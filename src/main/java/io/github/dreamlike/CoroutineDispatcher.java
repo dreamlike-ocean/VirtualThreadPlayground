@@ -40,12 +40,12 @@ public record CoroutineDispatcher(Executor defaultExecutor) implements Thread.Vi
                 .execute(task);
     }
 
-    public static void switchExecutor(Executor executor, Callable<?> task) {
+    public static <T> T switchExecutor(Executor executor, Callable<T> task) {
         DispatcherContext dispatcherContext = (DispatcherContext) getCurrentTask().attachment();
         Executor prevExecutor = dispatcherContext.currentExecutor.getAndSet(executor);
         Thread.yield();
         try {
-            task.call();
+            return task.call();
         } catch (Exception e) {
             throw new RuntimeException(e);
         } finally {

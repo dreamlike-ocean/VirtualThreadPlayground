@@ -31,10 +31,10 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        Properties properties = System.getProperties();
-        properties.setProperty("jdk.pollerMode", "3");
-        properties.setProperty("jdk.virtualThreadScheduler.implClass",
-                CustomerVirtualThreadScheduler.class.getTypeName());
+//        Properties properties = System.getProperties();
+//        properties.setProperty("jdk.pollerMode", "3");
+//        properties.setProperty("jdk.virtualThreadScheduler.implClass",
+//                CustomerVirtualThreadScheduler.class.getTypeName());
         // can't mix custom default scheduler and API prototypes at this time
         testSwitchExecutor();
     }
@@ -105,7 +105,8 @@ public class Main {
                     .scheduler(new CoroutineDispatcher(defaultExecutor))
                     .start(() -> {
                         System.out.println("before switch " + getCurrentCarrierThread());
-                        CoroutineDispatcher.switchExecutor(secondExecutor, () -> System.out.println("in switch " + getCurrentCarrierThread()));
+                        String s = CoroutineDispatcher.switchExecutor(secondExecutor, () -> "in switch " + getCurrentCarrierThread());
+                        System.out.println(s);
                         System.out.println("after switch " + getCurrentCarrierThread());
                     }).join();
         } catch (InterruptedException e) {
