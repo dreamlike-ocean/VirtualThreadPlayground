@@ -1,116 +1,141 @@
 package io.github.dreamlike;
 
-import java.io.IOException;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
-import java.lang.invoke.VarHandle;
-import java.net.Socket;
-import java.net.SocketOption;
-import java.util.Deque;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class Main {
 
-    private static final MethodHandle CURRENT_CARRIER_THREAD;
-
-    static {
-        MethodHandles.Lookup lookup = OpenDoorHelper.LOOKUP;
-        try {
-            CURRENT_CARRIER_THREAD = lookup.findStatic(
-                    Thread.class,
-                    "currentCarrierThread",
-                    MethodType.methodType(Thread.class));
-        } catch (NoSuchMethodException | IllegalAccessException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     public static void main(String[] args) {
-//        Properties properties = System.getProperties();
-//        properties.setProperty("jdk.pollerMode", "3");
-//        properties.setProperty("jdk.virtualThreadScheduler.implClass",
-//                CustomerVirtualThreadScheduler.class.getTypeName());
-        // can't mix custom default scheduler and API prototypes at this time
-        testSwitchExecutor();
+        Properties properties = System.getProperties();
+        properties.setProperty("jdk.pollerMode", "3");
+        properties.setProperty("jdk.virtualThreadScheduler.implClass",
+                "io.github.dreamlike.CustomerVirtualThreadScheduler");
+        plain();
+        propagateExecutor();
+        switchExecutor();
     }
 
-    public static Thread getCurrentCarrierThread() {
-        try {
-            return (Thread) CURRENT_CARRIER_THREAD.invokeExact();
-        } catch (Throwable e) {
-            throw new RuntimeException(e);
+    public static void plain() {
+        CompletableFuture<Thread> future = new CompletableFuture<>();
+        Thread.startVirtualThread(() -> future.complete(LoomSecretHelper.getCurrentCarrierThread()));
+        Thread thread = future.join();
+        if (!thread.getName().contains("ForkJoin")) {
+            throw new IllegalArgumentException(
+                    "thread name is not ForkJoin"
+            );
         }
     }
 
-    private static void testNest() {
-        var customerVirtualThreadScheduler = ((CustomerVirtualThreadScheduler) CompletableFuture.supplyAsync(Thread.VirtualThreadScheduler::current, Executors.newVirtualThreadPerTaskExecutor()).join());
-        var subVTSchedulerFuture = new CompletableFuture<Thread.VirtualThreadScheduler>();
-        Thread.ofVirtual()
-                .scheduler(customerVirtualThreadScheduler)
-                .name("parent vt")
-                .start(() -> {
-                    Thread.ofVirtual()
-                            .scheduler(customerVirtualThreadScheduler)
-                            .name("sub vt")
-                            .start(() -> subVTSchedulerFuture.complete(Thread.VirtualThreadScheduler.current()));
+    public static void propagateExecutor() {
+        String threadName = "EventLoop";
+        //  platform(with propagateExecutor) -> Thread.startVirtualThread => executor ✅
+        {
+            try (ExecutorService eventLoop = Executors.newSingleThreadExecutor(r -> new Thread(r, threadName))) {
+                CompletableFuture<Thread> currentThreadFuture = new CompletableFuture<>();
+                CustomerVirtualThreadScheduler.propagateExecutor(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(eventLoop), () -> {
+                    Thread.startVirtualThread(() -> {
+                        currentThreadFuture.complete(LoomSecretHelper.getCurrentCarrierThread());
+                    });
                 });
-        Thread.VirtualThreadScheduler subVTScheduler = subVTSchedulerFuture.join();
-        System.out.println("sub vt scheduler:" + subVTScheduler);
-        customerVirtualThreadScheduler.dispatchRecords()
-                .stream()
-                .filter(t -> t.getName() != null && !t.getName().isBlank())
-                .forEach(System.out::println);
-    }
 
-    private static void testPerCarrierPoller() {
-        var singleEventLoopScheduler = new SingleEventLoopScheduler();
-        CountDownLatch latch = new CountDownLatch(1);
-        Thread.ofVirtual()
-                .scheduler(singleEventLoopScheduler)
-                .name("netClient")
-                .start(() -> {
-                    try {
-                        try (Socket socket = new Socket("www.baidu.com", 8080)) {
-                            socket.setSoTimeout(1000);
-                            socket.getInputStream().read();
-                        }
-                    } catch (IOException e) {
-                    }
-                    latch.countDown();
-                });
-        try {
-            latch.await();
-            // 你可以看到
-            // VirtualThread[#32,event-loop-Read-Poller]/waiting
-            // VirtualThread[#29,netClient]/terminated
-            for (Thread threadRecord : singleEventLoopScheduler.threadRecords) {
-                System.out.println(threadRecord);
+                Thread thread = currentThreadFuture.join();
+                if (!thread.getName().equals(threadName)) {
+                    throw new IllegalArgumentException(
+                            "thread name is not " + threadName
+                    );
+                }
             }
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+        }
+        //  Thread.startVirtualThread -> Thread.startVirtualThread => executor ✅
+        {
+            try (ExecutorService eventLoop = Executors.newSingleThreadExecutor(r -> new Thread(r, threadName))) {
+                CompletableFuture<Thread> currentThreadFuture = new CompletableFuture<>();
+                Thread.startVirtualThread(() -> {
+                    CustomerVirtualThreadScheduler.propagateExecutor(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(eventLoop), () -> {
+                        Thread.startVirtualThread(() -> {
+                            currentThreadFuture.complete(LoomSecretHelper.getCurrentCarrierThread());
+                        });
+                    });
+                });
+                Thread thread = currentThreadFuture.join();
+                if (!thread.getName().equals(threadName)) {
+                    throw new IllegalArgumentException(
+                            "thread name is not " + threadName
+                    );
+                }
+            }
+        }
+        //vt(with executor) -> Thread.startVirtualThread => executor
+        {
+            try (ExecutorService eventLoop = Executors.newSingleThreadExecutor(r -> new Thread(r, threadName))) {
+                CompletableFuture<Thread> currentThreadFuture = new CompletableFuture<>();
+                CustomerVirtualThreadScheduler.propagateExecutor(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(eventLoop), () -> {
+                    Thread.startVirtualThread(() -> {
+                        Thread.startVirtualThread(() -> {
+                            currentThreadFuture.complete(LoomSecretHelper.getCurrentCarrierThread());
+                        });
+                    });
+                });
+                Thread thread = currentThreadFuture.join();
+                if (!thread.getName().equals(threadName)) {
+                    throw new IllegalArgumentException(
+                            "thread name is not " + threadName
+                    );
+                }
+            }
+        }
+
+        //vt(with executor) -> Thread.startVirtualThread -> Thread.startVirtualThread
+        {
+            try (ExecutorService eventLoop = Executors.newSingleThreadExecutor(r -> new Thread(r, threadName))) {
+                CompletableFuture<Thread> currentThreadFuture = new CompletableFuture<>();
+                CustomerVirtualThreadScheduler.propagateExecutor(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(eventLoop), () -> {
+                    Thread.startVirtualThread(() -> {
+                        Thread.startVirtualThread(() -> {
+                            Thread.startVirtualThread(() -> {
+                                currentThreadFuture.complete(LoomSecretHelper.getCurrentCarrierThread());
+                            });
+                        });
+                    });
+                });
+                Thread thread = currentThreadFuture.join();
+                if (!thread.getName().equals(threadName)) {
+                    throw new IllegalArgumentException(
+                            "thread name is not " + threadName
+                    );
+                }
+            }
         }
     }
 
-    private static void testSwitchExecutor() {
-        try (ExecutorService defaultExecutor = Executors.newFixedThreadPool(1, Thread.ofPlatform().name("first").factory());
-             ExecutorService secondExecutor = Executors.newFixedThreadPool(1, Thread.ofPlatform().name("second").factory());
+    public static void switchExecutor() {
+        String threadName = "EventLoop";
+        String backupName = "Backup";
+        try (ExecutorService eventLoop = Executors.newSingleThreadExecutor(r -> new Thread(r, threadName));
+             ExecutorService backup = Executors.newSingleThreadExecutor(r -> new Thread(r, backupName))
         ) {
-            Thread.ofVirtual()
-                    .name("main")
-                    .scheduler(new CoroutineDispatcher(defaultExecutor))
-                    .start(() -> {
-                        System.out.println("before switch " + getCurrentCarrierThread());
-                        String s = CoroutineDispatcher.switchExecutor(secondExecutor, () -> "in switch " + getCurrentCarrierThread());
-                        System.out.println(s);
-                        System.out.println("after switch " + getCurrentCarrierThread());
-                    }).join();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+            CompletableFuture<Thread> threadCompletableFuture = new CompletableFuture<>();
+            CompletableFuture<Thread> afterSwitchThreadCompletableFuture = new CompletableFuture<>();
+            CustomerVirtualThreadScheduler.newThread(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(eventLoop), () -> {
+                Thread targetThread = CustomerVirtualThreadScheduler.switchExecutor(CustomerVirtualThreadScheduler.AwareShutdownExecutor.adapt(backup), LoomSecretHelper::getCurrentCarrierThread);
+                threadCompletableFuture.complete(targetThread);
+                afterSwitchThreadCompletableFuture.complete(LoomSecretHelper.getCurrentCarrierThread());
+            }).start();
+
+            Thread thread = threadCompletableFuture.join();
+            if (!thread.getName().equals(backupName)) {
+                throw new IllegalArgumentException(
+                        "thread name is not " + backupName
+                );
+            }
+            Thread afterSwitchThread = afterSwitchThreadCompletableFuture.join();
+            if (!afterSwitchThread.getName().equals(threadName)) {
+                throw new IllegalArgumentException(
+                        "thread name is not " + threadName
+                );
+            }
         }
     }
 }
