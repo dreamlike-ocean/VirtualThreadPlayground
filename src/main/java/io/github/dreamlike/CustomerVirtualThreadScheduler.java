@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 // 如果是来自于CustomerVirtualThreadScheduler的那么其DISPATCHER_EXECUTOR_SCOPED_VALUE肯定是有值的
 public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadScheduler {
 
+    private static final boolean POLLER_PER_CARRIER_THREAD = Integer.parseInt(System.getProperty("jdk.pollerMode", "0")) == 3;
     private static final DispatcherContext DUMMY = new EmptyContext(null);
     private static final ScopedValue<DispatcherContext> DISPATCHER_EXECUTOR_SCOPED_VALUE = ScopedValue.newInstance();
     public static CustomerVirtualThreadScheduler INSTANCE;
@@ -35,9 +36,20 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
             }
             return;
         }
+        Thread startingVT = task.thread();
         DispatcherContext parentContext = getCurrentContext();
         if (parentContext != null) {
-            DispatcherContext newContext = parentContext.inheritContext(task.thread());
+            if (isPollerPerCarrierThread(startingVT)) {
+                PollerContext context = new PollerContext(parentContext, startingVT, parentContext.executor());
+                task.attach(context);
+                if (context.executor().execute(context.initialTask(task))) {
+                    return;
+                } else {
+                    throw new IllegalStateException("poller thread start fail!");
+                }
+            }
+
+            DispatcherContext newContext = parentContext.inheritContext(startingVT);
             task.attach(newContext);
             if (newContext.executor().execute(task)) {
                 return;
@@ -51,10 +63,21 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
 
     @Override
     public void onContinue(Thread.VirtualThreadTask task) {
+        if (task.attachment() instanceof PollerContext pollerContext) {
+            Runnable runnable = pollerContext.assertThreadTask(task);
+            if (pollerContext.executor().execute(runnable)) {
+                return;
+            }
+            throw new IllegalStateException("poller thread continue fail!");
+        }
         if (task.attachment() instanceof DispatcherContext dispatcherContext && dispatcherContext.executor().execute(task)) {
             return;
         }
         jdkBuildInScheduler.onContinue(task);
+    }
+
+    private boolean isPollerPerCarrierThread(Thread pollerThread) {
+        return POLLER_PER_CARRIER_THREAD && pollerThread.getName().endsWith("Read-Poller");
     }
 
     public static Thread newThread(AwareShutdownExecutor executor, Runnable runnable) {
@@ -126,7 +149,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         return null;
     }
 
-    private sealed static abstract class DispatcherContext permits DynamicDispatcherContext, EmptyContext, PinningContext {
+    private sealed static abstract class DispatcherContext permits DynamicDispatcherContext, EmptyContext, PinningContext, PollerContext {
         protected final DispatcherContext parent;
         protected Thread currentThread;
 
@@ -138,6 +161,49 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         abstract AwareShutdownExecutor executor();
 
         abstract DispatcherContext inheritContext(Thread currentThread);
+    }
+
+    private final static class PollerContext extends DispatcherContext {
+        private final AwareShutdownExecutor executor;
+        private final AtomicReference<Thread> currentCarrierThread;
+
+        private PollerContext(DispatcherContext parent, Thread currentThread, AwareShutdownExecutor executor) {
+            super(parent, currentThread);
+            this.executor = executor;
+            this.currentCarrierThread = new AtomicReference<>();
+        }
+
+        private void markCurrentCarrierThread(Thread currentCarrierThread) {
+            if (!this.currentCarrierThread.compareAndSet(null, currentCarrierThread)) {
+                throw new IllegalStateException("current carrier thread is not null");
+            }
+        }
+
+        private Runnable initialTask(Thread.VirtualThreadTask virtualThreadTask) {
+            return () -> {
+                markCurrentCarrierThread(Thread.currentThread());
+                virtualThreadTask.run();
+            };
+        }
+
+        private Runnable  assertThreadTask(Thread.VirtualThreadTask virtualThreadTask) {
+            return () -> {
+                if (currentCarrierThread.get() != Thread.currentThread()) {
+                    throw new IllegalStateException("current thread is not the same as the carrier thread");
+                }
+                virtualThreadTask.run();
+            };
+        }
+
+        @Override
+        public AwareShutdownExecutor executor() {
+            return executor;
+        }
+
+        @Override
+        DispatcherContext inheritContext(Thread currentThread) {
+            return new PollerContext(this, currentThread, executor);
+        }
     }
 
     private final static class PinningContext extends DispatcherContext {
