@@ -9,7 +9,7 @@ import java.util.stream.Collectors;
 
 public class Main {
 
-    public static void main(String[] args) {
+    public static void main() {
         Properties properties = System.getProperties();
         properties.setProperty("jdk.pollerMode", "3");
         properties.setProperty("jdk.virtualThreadScheduler.implClass",
