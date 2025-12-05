@@ -41,7 +41,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         DispatcherContext parentContext = getCurrentContext();
         if (parentContext != null) {
             if (isPollerPerCarrierThread(startingVT)) {
-                PollerContext context = new PollerContext(parentContext, startingVT, parentContext.executor());
+                PollerContext context = new PollerContext(parentContext, startingVT, parentContext.executor(), task.preferredCarrier());
                 task.attach(context);
                 if (context.executor().execute(context.initialTask(task), task.preferredCarrier())) {
                     return;
@@ -166,28 +166,16 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
 
     private final static class PollerContext extends DispatcherContext {
         private final AwareShutdownExecutor executor;
-        private final AtomicReference<Thread> currentCarrierThread;
+        private final Thread currentCarrierThread;
 
-        private PollerContext(DispatcherContext parent, Thread currentThread, AwareShutdownExecutor executor) {
+        private PollerContext(DispatcherContext parent, Thread currentThread, AwareShutdownExecutor executor, Thread currentCarrierThread) {
             super(parent, currentThread);
             this.executor = executor;
-            this.currentCarrierThread = new AtomicReference<>();
-        }
-
-        private void markCurrentCarrierThread(Thread currentCarrierThread) {
-            if (!this.currentCarrierThread.compareAndSet(null, currentCarrierThread)) {
-                throw new IllegalStateException("current carrier thread is not null");
-            }
+            this.currentCarrierThread = currentCarrierThread;
         }
 
         private Runnable initialTask(Thread.VirtualThreadTask virtualThreadTask) {
-            if (!CHECK_CARRIER_THREAD) {
-                return virtualThreadTask;
-            }
-            return () -> {
-                markCurrentCarrierThread(Thread.currentThread());
-                virtualThreadTask.run();
-            };
+           return virtualThreadTask;
         }
 
         private Runnable assertThreadTask(Thread.VirtualThreadTask virtualThreadTask) {
@@ -195,7 +183,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
                 return virtualThreadTask;
             }
             return () -> {
-                if (currentCarrierThread.get() != Thread.currentThread()) {
+                if (currentCarrierThread != Thread.currentThread()) {
                     throw new IllegalStateException("current thread is not the same as the carrier thread");
                 }
                 virtualThreadTask.run();
