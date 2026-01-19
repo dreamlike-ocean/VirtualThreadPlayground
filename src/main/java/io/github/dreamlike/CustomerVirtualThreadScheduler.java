@@ -82,9 +82,10 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
     }
 
     public static Thread newThread(AwareShutdownExecutor executor, Runnable runnable) {
-        DynamicDispatcherContext newContext = new DynamicDispatcherContext(getCurrentContext(), null, executor);
-        Thread thread = Thread.ofVirtual().unstarted(() -> ScopedValue.where(DISPATCHER_EXECUTOR_SCOPED_VALUE, newContext).run(runnable), null, newContext);
-        newContext.currentThread = thread;
+        Thread.VirtualThreadTask virtualThreadTask = INSTANCE.newThread(Thread.ofVirtual(), runnable);
+        Thread thread = virtualThreadTask.thread();
+        DynamicDispatcherContext newContext = new DynamicDispatcherContext(getCurrentContext(), thread, executor);
+        virtualThreadTask.attach(newContext);
         return thread;
     }
 
@@ -152,7 +153,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
 
     private sealed static abstract class DispatcherContext permits DynamicDispatcherContext, EmptyContext, PinningContext, PollerContext {
         protected final DispatcherContext parent;
-        protected Thread currentThread;
+        protected final Thread currentThread;
 
         private DispatcherContext(DispatcherContext parent, Thread currentThread) {
             this.parent = parent;
