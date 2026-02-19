@@ -82,7 +82,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
     }
 
     public static Thread newThread(AwareShutdownExecutor executor, Runnable runnable) {
-        Thread.VirtualThreadTask virtualThreadTask = INSTANCE.newThread(Thread.ofVirtual(), runnable);
+        Thread.VirtualThreadTask virtualThreadTask = INSTANCE.newThread(Thread.ofVirtual(), null, runnable);
         Thread thread = virtualThreadTask.thread();
         DynamicDispatcherContext newContext = new DynamicDispatcherContext(getCurrentContext(), thread, executor);
         virtualThreadTask.attach(newContext);

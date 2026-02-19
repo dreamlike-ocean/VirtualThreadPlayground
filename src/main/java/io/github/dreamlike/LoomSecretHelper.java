@@ -23,7 +23,7 @@ public class LoomSecretHelper {
                     MethodType.methodType(Thread.class));
             Class<? extends Thread> vtClass = Thread.ofVirtual().unstarted(() -> {
             }).getClass();
-            VIRTUAL_THREAD_TASK_VAR_HANDLER = LOOKUP.findVarHandle(vtClass, "runContinuation", Thread.VirtualThreadTask.class);
+            VIRTUAL_THREAD_TASK_VAR_HANDLER = LOOKUP.unreflectVarHandle(vtClass.getDeclaredField("runContinuation"));
         } catch (NoSuchMethodException | InvocationTargetException | InstantiationException | IllegalAccessException |
                  NoSuchFieldException e) {
             throw new RuntimeException(e);
