@@ -64,7 +64,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
 
     @Override
     public void onContinue(Thread.VirtualThreadTask task) {
-        if (task.attachment() instanceof PollerContext pollerContext) {
+        if (POLLER_PER_CARRIER_THREAD && task.attachment() instanceof PollerContext pollerContext) {
             Runnable runnable = pollerContext.assertThreadTask(task);
             if (pollerContext.executor().execute(runnable, task.preferredCarrier())) {
                 return;
