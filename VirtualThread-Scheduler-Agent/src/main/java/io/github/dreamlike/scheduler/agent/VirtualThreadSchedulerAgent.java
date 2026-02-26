@@ -1,45 +1,72 @@
 package io.github.dreamlike.scheduler.agent;
 
+import java.io.OutputStream;
 import java.lang.classfile.*;
 import java.lang.classfile.attribute.ExceptionsAttribute;
-import java.lang.classfile.constantpool.ConstantPool;
 import java.lang.classfile.constantpool.Utf8Entry;
 import java.lang.constant.ClassDesc;
+import java.lang.constant.ConstantDescs;
+import java.lang.constant.MethodHandleDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.AccessFlag;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.ProtectionDomain;
-import java.util.ServiceLoader;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+import java.util.jar.JarOutputStream;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-/**
- * A minimal Java agent that prints the names of bootstrap classes it sees without modifying them.
- */
 public final class VirtualThreadSchedulerAgent {
 
+    private static final String POLL_IMPL_CLASS = "jdk.virtualThreadScheduler.poller.implClass";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean();
+    private static final String PROXY_POLLER_CLASS_NAME = "sun.nio.ch.JdkPollerProxy";
+    private static final Map<String, String> args = new HashMap<>();
+    private static String pollerImplClass = null;
 
     private VirtualThreadSchedulerAgent() {
     }
 
     public static void premain(String agentArgs, Instrumentation inst) {
-        install(inst);
+        install(agentArgs, inst);
     }
 
     public static void agentmain(String agentArgs, Instrumentation inst) {
-        install(inst);
+        install(agentArgs, inst);
     }
 
-    private static void install(Instrumentation instrumentation) {
+    private static void install(String agentArgs, Instrumentation instrumentation) {
         if (!INSTALLED.compareAndSet(false, true)) {
             return;
         }
+        initArgs(agentArgs);
         System.setProperty("jdk.pollerMode", "1");
-        ClassFileTransformer transformer = new BootstrapClassLoggingTransformer();
+        ClassFileTransformer transformer = new PollerRewriteTransformer();
         System.out.println("[VirtualThreadSchedulerAgent] installing agent; retransform support = "
                 + instrumentation.isRetransformClassesSupported());
+
         try {
+            Path jarPath = Files.createTempFile("tempPoller", ".jar");
+            jarPath.toFile().deleteOnExit();
+            try (OutputStream fos = Files.newOutputStream(jarPath);
+                 JarOutputStream jos = new JarOutputStream(fos)) {
+                JarEntry e = new JarEntry(PROXY_POLLER_CLASS_NAME.replace(".", "/") + ".class");
+                e.setTime(0); // optional: stable timestamp
+                jos.putNextEntry(e);
+                jos.write(jdkPollerProxy());
+                jos.closeEntry();
+            }
+            // JarFile requires a real file path
+            JarFile jf = new JarFile(jarPath.toFile());
+            instrumentation.appendToBootstrapClassLoaderSearch(jf);
             instrumentation.addTransformer(transformer, true);
         } catch (Throwable t) {
             System.err.println("[VirtualThreadSchedulerAgent] failed to register transformer");
@@ -50,7 +77,20 @@ public final class VirtualThreadSchedulerAgent {
         }
     }
 
-    private static final class BootstrapClassLoggingTransformer implements ClassFileTransformer {
+    private static void initArgs(String agentArgs) {
+        String[] split = Objects.requireNonNullElse(agentArgs, "").split(",");
+        Map<String, String> argMap = Stream.of(split)
+                .map(s -> s.split("="))
+                .filter(s -> s.length == 2)
+                .collect(Collectors.toMap(s -> s[0], s -> s[1], (a, b) -> a));
+        args.putAll(argMap);
+        pollerImplClass = args.get(POLL_IMPL_CLASS);
+        if (pollerImplClass == null) {
+            throw new NullPointerException(POLL_IMPL_CLASS + " is null");
+        }
+    }
+
+    private static final class PollerRewriteTransformer implements ClassFileTransformer {
         @Override
         public byte[] transform(Module module,
                                 ClassLoader loader,
@@ -119,119 +159,162 @@ public final class VirtualThreadSchedulerAgent {
         classBuilder.withMethod("spiPoller",
                 MethodTypeDesc.ofDescriptor("()Lsun/nio/ch/Poller;"),
                 AccessFlag.STATIC.mask() | AccessFlag.PUBLIC.mask(), mb -> {
+                    mb.with(ExceptionsAttribute.ofSymbols(ClassDesc.ofDescriptor("Ljava/io/IOException;")));
                     mb.withCode(cb -> {
-                        ClassDesc pollerDesc = ClassDesc.ofDescriptor("Lsun/nio/ch/Poller;");
-                        ClassDesc serviceLoaderDesc = ClassDesc.ofDescriptor("Ljava/util/ServiceLoader;");
-                        ClassDesc streamDesc = ClassDesc.ofDescriptor("Ljava/util/stream/Stream;");
-                        ClassDesc listDesc = ClassDesc.ofDescriptor("Ljava/util/List;");
-                        ClassDesc providerDesc = ClassDesc.ofDescriptor("Ljava/util/ServiceLoader$Provider;");
-                        ClassDesc illegalArgumentExceptionDesc = ClassDesc.ofDescriptor("Ljava/lang/IllegalArgumentException;");
-
-                        Label atLeastOneImplementation = cb.newLabel();
-                        Label singleImplementation = cb.newLabel();
-
-                        cb.ldc(pollerDesc);
-                        cb.invokestatic(serviceLoaderDesc, "load", MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;)Ljava/util/ServiceLoader;"));
-                        cb.astore(0);
-                        cb.aload(0);
-                        cb.invokevirtual(serviceLoaderDesc, "stream", MethodTypeDesc.ofDescriptor("()Ljava/util/stream/Stream;"));
-                        cb.invokeinterface(streamDesc, "toList", MethodTypeDesc.ofDescriptor("()Ljava/util/List;"));
-                        cb.astore(1);
-                        cb.aload(1);
-                        cb.invokeinterface(listDesc, "isEmpty", MethodTypeDesc.ofDescriptor("()Z"));
-                        cb.ifeq(atLeastOneImplementation);
-                        cb.new_(illegalArgumentExceptionDesc);
+                        ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
+                        cb.new_(proxyDesc);
                         cb.dup();
-                        cb.ldc("Provide at least one Poller implementation.");
-                        cb.invokespecial(illegalArgumentExceptionDesc, "<init>", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;)V"));
-                        cb.athrow();
-
-                        cb.labelBinding(atLeastOneImplementation);
-                        cb.aload(1);
-                        cb.invokeinterface(listDesc, "size", MethodTypeDesc.ofDescriptor("()I"));
-                        cb.iconst_1();
-                        cb.if_icmple(singleImplementation);
-                        cb.new_(illegalArgumentExceptionDesc);
-                        cb.dup();
-                        cb.ldc("Multiple Poller implementations found.");
-                        cb.invokespecial(illegalArgumentExceptionDesc, "<init>", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;)V"));
-                        cb.athrow();
-
-                        cb.labelBinding(singleImplementation);
-                        cb.aload(1);
-                        cb.iconst_0();
-                        cb.invokeinterface(listDesc, "get", MethodTypeDesc.ofDescriptor("(I)Ljava/lang/Object;"));
-                        cb.checkcast(providerDesc);
-                        cb.astore(2);
-                        cb.aload(2);
-                        cb.invokeinterface(providerDesc, "get", MethodTypeDesc.ofDescriptor("()Ljava/lang/Object;"));
-                        cb.checkcast(pollerDesc);
+                        cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
                         cb.areturn();
                     });
                 });
     }
-    // 上面的classfile api搞出来的 就是下面的字节码
-    //public static spiPoller()Lsun/nio/ch/Poller;
-    //   L0
-    //    LINENUMBER 17 L0
-    //    LDC Lsun/nio/ch/Poller;.class
-    //    INVOKESTATIC java/util/ServiceLoader.load (Ljava/lang/Class;)Ljava/util/ServiceLoader;
-    //    ASTORE 0
-    //   L1
-    //    LINENUMBER 18 L1
-    //    ALOAD 0
-    //    INVOKEVIRTUAL java/util/ServiceLoader.stream ()Ljava/util/stream/Stream;
-    //    INVOKEINTERFACE java/util/stream/Stream.toList ()Ljava/util/List; (itf)
-    //    ASTORE 1
-    //   L2
-    //    LINENUMBER 19 L2
-    //    ALOAD 1
-    //    INVOKEINTERFACE java/util/List.isEmpty ()Z (itf)
-    //    IFEQ L3
-    //   L4
-    //    LINENUMBER 20 L4
-    //    NEW java/lang/IllegalArgumentException
-    //    DUP
-    //    LDC "Provide at least one Poller implementation."
-    //    INVOKESPECIAL java/lang/IllegalArgumentException.<init> (Ljava/lang/String;)V
-    //    ATHROW
-    //   L3
-    //    LINENUMBER 22 L3
-    //    ALOAD 1
-    //    INVOKEINTERFACE java/util/List.size ()I (itf)
-    //    ICONST_1
-    //    IF_ICMPLE L5
-    //   L6
-    //    LINENUMBER 23 L6
-    //    NEW java/lang/IllegalArgumentException
-    //    DUP
-    //    LDC "Multiple Poller implementations found."
-    //    INVOKESPECIAL java/lang/IllegalArgumentException.<init> (Ljava/lang/String;)V
-    //    ATHROW
-    //   L5
-    //    LINENUMBER 25 L5
-    //    ALOAD 1
-    //    ICONST_0
-    //    INVOKEINTERFACE java/util/List.get (I)Ljava/lang/Object; (itf)
-    //    CHECKCAST java/util/ServiceLoader$Provider
-    //    ASTORE 2
-    //   L7
-    //    LINENUMBER 26 L7
-    //    ALOAD 2
-    //    INVOKEINTERFACE java/util/ServiceLoader$Provider.get ()Ljava/lang/Object; (itf)
-    //    CHECKCAST sun/nio/ch/Poller
-    //    ARETURN
-    //   L8
-    //    LOCALVARIABLE pollerServiceLoader Ljava/util/ServiceLoader; L1 L8 0
-    //    // signature Ljava/util/ServiceLoader<Lsun/nio/ch/Poller;>;
-    //    // declaration: pollerServiceLoader extends java.util.ServiceLoader<sun.nio.ch.Poller>
-    //    LOCALVARIABLE pollImplements Ljava/util/List; L2 L8 1
-    //    // signature Ljava/util/List<Ljava/util/ServiceLoader$Provider<Lsun/nio/ch/Poller;>;>;
-    //    // declaration: pollImplements extends java.util.List<java.util.ServiceLoader$Provider<sun.nio.ch.Poller>>
-    //    LOCALVARIABLE pollerProvider Ljava/util/ServiceLoader$Provider; L7 L8 2
-    //    // signature Ljava/util/ServiceLoader$Provider<Lsun/nio/ch/Poller;>;
-    //    // declaration: pollerProvider extends java.util.ServiceLoader$Provider<sun.nio.ch.Poller>
-    //    MAXSTACK = 3
-    //    MAXLOCALS = 3
 
+    private static byte[] jdkPollerProxy() {
+        ClassFile classFile = ClassFile.of();
+        String realPollerFieldName = "_realPoller";
+        ClassDesc pollerImplDesc = ClassDesc.of(pollerImplClass);
+        ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
+        ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
+        MethodTypeDesc implReadDesc = MethodTypeDesc.ofDescriptor("(I[BIIJLjava/util/function/BooleanSupplier;)I");
+        MethodTypeDesc implWriteDesc = MethodTypeDesc.ofDescriptor("(I[BIILjava/util/function/BooleanSupplier;)I");
+        MethodTypeDesc implStartDesc = MethodTypeDesc.ofDescriptor("(I)V");
+        MethodTypeDesc implStopDesc = MethodTypeDesc.ofDescriptor("(IZ)V");
+        MethodTypeDesc pollDesc = MethodTypeDesc.ofDescriptor("(I)I");
+        MethodTypeDesc closeDesc = MethodTypeDesc.ofDescriptor("()V");
+        return classFile.build(proxyDesc, classBuilder -> {
+            classBuilder.withSuperclass(ClassDesc.of("sun.nio.ch", "Poller"));
+            classBuilder.withField(realPollerFieldName, pollerImplDesc, fieldBuilder -> {
+               fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL);
+            });
+            classBuilder.withMethod(ConstantDescs.INIT_NAME, ConstantDescs.MTD_void, 0, methodBuilder -> {
+                methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                methodBuilder.withCode(cb -> {
+                    cb.aload(0);
+                    cb.invokespecial(ClassDesc.of("sun.nio.ch", "Poller"), ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
+                    cb.return_();
+                });
+            });
+            classBuilder.withMethod(ConstantDescs.CLASS_INIT_NAME, ConstantDescs.MTD_void, AccessFlag.STATIC.mask(), methodBuilder -> {
+                methodBuilder.withCode(codeBuilder -> {
+                    Label tryStart = codeBuilder.newLabel();
+                    Label tryEnd = codeBuilder.newLabel();
+                    Label catchLabel = codeBuilder.newLabel();
+                    Label returnLabel = codeBuilder.newLabel();
+
+                    ClassDesc threadDesc = ClassDesc.ofDescriptor("Ljava/lang/Thread;");
+                    ClassDesc classDesc = ClassDesc.ofDescriptor("Ljava/lang/Class;");
+                    ClassDesc constructorDesc = ClassDesc.ofDescriptor("Ljava/lang/reflect/Constructor;");
+                    ClassDesc objectDesc = ClassDesc.ofDescriptor("Ljava/lang/Object;");
+                    ClassDesc runtimeExceptionDesc = ClassDesc.ofDescriptor("Ljava/lang/RuntimeException;");
+                    ClassDesc exceptionDesc = ClassDesc.ofDescriptor("Ljava/lang/Exception;");
+
+                    String errorMessage = "init " + pollerImplClass + " fail!";
+
+                    codeBuilder.labelBinding(tryStart);
+                    codeBuilder.invokestatic(threadDesc, "currentThread", MethodTypeDesc.ofDescriptor("()Ljava/lang/Thread;"));
+                    codeBuilder.invokevirtual(threadDesc, "getContextClassLoader", MethodTypeDesc.ofDescriptor("()Ljava/lang/ClassLoader;"));
+                    codeBuilder.astore(0);
+
+                    codeBuilder.ldc(pollerImplClass);
+                    codeBuilder.iconst_1();
+                    codeBuilder.aload(0);
+                    codeBuilder.invokestatic(classDesc, "forName", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"));
+                    codeBuilder.astore(1);
+
+                    codeBuilder.aload(1);
+                    codeBuilder.iconst_0();
+                    codeBuilder.anewarray(classDesc);
+                    codeBuilder.invokevirtual(classDesc, "getConstructor", MethodTypeDesc.ofDescriptor("([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;"));
+                    codeBuilder.iconst_0();
+                    codeBuilder.anewarray(objectDesc);
+                    codeBuilder.invokevirtual(constructorDesc, "newInstance", MethodTypeDesc.ofDescriptor("([Ljava/lang/Object;)Ljava/lang/Object;"));
+                    codeBuilder.checkcast(pollerImplDesc);
+                    codeBuilder.putstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+
+                    codeBuilder.labelBinding(tryEnd);
+                    codeBuilder.branch(Opcode.GOTO, returnLabel);
+
+                    codeBuilder.labelBinding(catchLabel);
+                    codeBuilder.astore(0);
+                    codeBuilder.new_(runtimeExceptionDesc);
+                    codeBuilder.dup();
+                    codeBuilder.ldc(errorMessage);
+                    codeBuilder.aload(0);
+                    codeBuilder.invokespecial(runtimeExceptionDesc, ConstantDescs.INIT_NAME, MethodTypeDesc.ofDescriptor("(Ljava/lang/String;Ljava/lang/Throwable;)V"));
+                    codeBuilder.athrow();
+
+                    codeBuilder.labelBinding(returnLabel);
+                    codeBuilder.return_();
+
+                    codeBuilder.exceptionCatch(tryStart, tryEnd, catchLabel, exceptionDesc);
+                });
+            });
+
+            classBuilder.withMethod("implRead", implReadDesc, 0, methodBuilder -> {
+                methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.iload(1);
+                    cb.aload(2);
+                    cb.iload(3);
+                    cb.iload(4);
+                    cb.lload(5);
+                    cb.aload(7);
+                    cb.invokevirtual(pollerImplDesc, "implRead", implReadDesc);
+                    cb.ireturn();
+                });
+            });
+
+            classBuilder.withMethod("implWrite", implWriteDesc, 0, methodBuilder -> {
+                methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.iload(1);
+                    cb.aload(2);
+                    cb.iload(3);
+                    cb.iload(4);
+                    cb.aload(5);
+                    cb.invokevirtual(pollerImplDesc, "implWrite", implWriteDesc);
+                    cb.ireturn();
+                });
+            });
+
+            classBuilder.withMethod("implStartPoll", implStartDesc, 0, methodBuilder -> {
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.iload(1);
+                    cb.invokevirtual(pollerImplDesc, "implStartPoll", implStartDesc);
+                    cb.return_();
+                });
+            });
+
+            classBuilder.withMethod("implStopPoll", implStopDesc, 0, methodBuilder -> {
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.iload(1);
+                    cb.iload(2);
+                    cb.invokevirtual(pollerImplDesc, "implStopPoll", implStopDesc);
+                    cb.return_();
+                });
+            });
+
+            classBuilder.withMethod("poll", pollDesc, 0, methodBuilder -> {
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.iload(1);
+                    cb.invokevirtual(pollerImplDesc, "poll", pollDesc);
+                    cb.ireturn();
+                });
+            });
+
+            classBuilder.withMethod("close", closeDesc, 0, methodBuilder -> {
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, realPollerFieldName, pollerImplDesc);
+                    cb.invokevirtual(pollerImplDesc, "close", closeDesc);
+                    cb.return_();
+                });
+            });
+        });
+    }
 }

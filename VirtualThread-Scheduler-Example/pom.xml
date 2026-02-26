@@ -15,6 +15,11 @@
     <dependencies>
         <dependency>
             <groupId>io.github.dreamlike</groupId>
+            <artifactId>VirtualThread-Scheduler-Core</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.dreamlike</groupId>
             <artifactId>VirtualThread-Scheduler-Agent</artifactId>
             <version>${project.version}</version>
         </dependency>
@@ -26,12 +31,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.14.1</version>
-                <configuration>
-                    <compilerArgs>
-                        <arg>--add-exports</arg>
-                        <arg>java.base/sun.nio.ch=ALL-UNNAMED</arg>
-                    </compilerArgs>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
