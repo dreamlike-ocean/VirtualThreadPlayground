@@ -1,26 +1,21 @@
 package io.github.dreamlike.scheduler.agent;
 
-import java.io.OutputStream;
 import java.lang.classfile.*;
 import java.lang.classfile.attribute.ExceptionsAttribute;
 import java.lang.classfile.constantpool.Utf8Entry;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
-import java.lang.constant.MethodHandleDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.AccessFlag;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.security.ProtectionDomain;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
-import java.util.jar.JarOutputStream;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -54,20 +49,25 @@ public final class VirtualThreadSchedulerAgent {
                 + instrumentation.isRetransformClassesSupported());
 
         try {
-            Path jarPath = Files.createTempFile("tempPoller", ".jar");
-            jarPath.toFile().deleteOnExit();
-            try (OutputStream fos = Files.newOutputStream(jarPath);
-                 JarOutputStream jos = new JarOutputStream(fos)) {
-                JarEntry e = new JarEntry(PROXY_POLLER_CLASS_NAME.replace(".", "/") + ".class");
-                e.setTime(0); // optional: stable timestamp
-                jos.putNextEntry(e);
-                jos.write(jdkPollerProxy());
-                jos.closeEntry();
-            }
-            // JarFile requires a real file path
-            JarFile jf = new JarFile(jarPath.toFile());
-            instrumentation.appendToBootstrapClassLoaderSearch(jf);
             instrumentation.addTransformer(transformer, true);
+            // Define the proxy class *into java.base* (same module/package as sun.nio.ch.*),
+            // so that java.base classes can link to it. Putting it on the bootstrap classpath
+            // would place it in the bootstrap unnamed module, which java.base does not read.
+            Module javaBase = Object.class.getModule();
+            Module agentModule = VirtualThreadSchedulerAgent.class.getModule();
+            instrumentation.redefineModule(
+                    javaBase,
+                    Set.of(),
+                    Map.of(),
+                    Map.of("sun.nio.ch", Set.of(agentModule)),
+                    Set.of(),
+                    Map.of()
+            );
+
+            Class<?> anchor = Class.forName("sun.nio.ch.DefaultPollerProvider", false, null);
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(anchor, MethodHandles.lookup());
+            lookup.defineClass(jdkPollerProxy());
+
         } catch (Throwable t) {
             System.err.println("[VirtualThreadSchedulerAgent] failed to register transformer");
             t.printStackTrace(System.err);
