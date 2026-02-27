@@ -16,4 +16,9 @@ public class CustomerPoller implements Poller {
         return 0;
     }
 
+    @Override
+    public int poll(int timeout) {
+        System.out.println("poll do nothing");
+        throw new RuntimeException("poll do nothing");
+    }
 }
