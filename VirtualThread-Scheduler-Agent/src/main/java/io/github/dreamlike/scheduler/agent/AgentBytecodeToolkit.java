@@ -8,24 +8,30 @@ import java.lang.classfile.attribute.ExceptionsAttribute;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
 import java.lang.constant.MethodTypeDesc;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
 
 final class AgentBytecodeToolkit {
 
+    // Must be in the same package as VirtualThreadPoller for Lookup#defineClass.
+    static final String JDK_POLLER_ADAPTOR_CLASS_NAME = "io.github.dreamlike.scheduler.agent.JdkVirtualThreadPollerAdaptor";
+    static final String CORE_POLLER_INTERFACE_NAME = "io.github.dreamlike.VirtualThreadPoller";
     private AgentBytecodeToolkit() {
     }
 
-    static byte[] proxyJdkPoller() {
+    static byte[] jdkPollerToVirtualThreadPollerAdaptor() {
         String jdkProxyFieldName = "_jdkPoller";
         ClassDesc pollerDesc = ClassDesc.of("sun.nio.ch.Poller");
         ClassFile classFile = ClassFile.of();
-        ClassDesc thisClassDesc = ClassDesc.of("io.github.dreamlike.scheduler", "JdkVirtualThreadPoller");
+        ClassDesc thisClassDesc = ClassDesc.of(JDK_POLLER_ADAPTOR_CLASS_NAME);
         ClassDesc booleanSupplierDesc = ClassDesc.of("java.util.function.BooleanSupplier");
         ClassDesc byteArrayDesc = ClassDesc.ofDescriptor("[B");
 
         return classFile.build(thisClassDesc, classBuilder -> {
             classBuilder.withFlags(AccessFlag.PUBLIC.mask() | AccessFlag.FINAL.mask());
-            classBuilder.withInterfaceSymbols(ClassDesc.of("io.github.dreamlike.VirtualThreadPoller"));
+            classBuilder.withInterfaceSymbols(ClassDesc.of(CORE_POLLER_INTERFACE_NAME));
             classBuilder.withField(jdkProxyFieldName, pollerDesc, AccessFlag.PUBLIC.mask() | AccessFlag.FINAL.mask());
             classBuilder.withMethodBody(
                     ConstantDescs.INIT_NAME,
@@ -145,19 +151,64 @@ final class AgentBytecodeToolkit {
         });
     }
 
+    // jdkPollerProxy差不多是
+    // package sun.nio.ch.JdkPollerProxy;
+    // class JdkPollerProxy extends sun.nio.ch.Poller {
+    //     static final Methodhandle CustomerPollerCtor;
+    //      static final MethodHandle implStartPollMH;
+    //       .... 等等io.github.dreamlike.VirtualThreadPoller中的其他函数mh 这些在customerPollerClass中都存在
+    //
+    //   static {
+    //       ClassLoader var1 = Thread.currentThread().getContextClassLoader();
+    //       if (var1 == null) {
+    //             var1 = ClassLoader.getSystemClassLoader();
+    //       }
+    //
+    //      Class customerPollerClass = Class.forName("io.github.dreamlike.scheduler.example.CustomerPoller", true, var1);
+    //       Class pollerClass = Class.forName("io.github.dreamlike.VirtualThreadPoller", true, var1);
+    //      MethodHandles.Lookup var3 = MethodHandles.publicLookup();
+    //        customerPollerCtorMH = var3.findConstructor(var2, MethodType.methodType(void.class, pollerClass));
+    //        implStartPollMH = var3.findVirtual(customerPollerClass, ..省略MethodType)
+    //        ....省略其他mh获取
+    //   }
+
+    //  final Object customerPoller;
+    //    public JdkPollerProxy(Object jdkPoller) {
+    //      this.customerPoller = CustomerPollerCtor.invoke(jdkPoller);
+    //    }
+    //    void implStartPoll(int fdVal) throws IOException {
+    //      implStartPollMH.invokeExact((io.github.dreamlike.scheduler.example.CustomerPoller)customerPoller, fdVal);
+    //    }
+    //  ....省略其他poller函数 宗旨就是sun.nio.ch.Poller和io.github.dreamlike.VirtualThreadPoller方法一一对应去代理
+    // }
     static byte[] jdkPollerProxy(String proxyPollerClassName, String pollerImplClass) {
+
         ClassFile classFile = ClassFile.of();
+
+        String pollerInstanceFieldName = "_poller";
+        String mhCtorFieldName = "_mhCtor";
+        String mhAdaptorCtorFieldName = "_mhAdaptorCtor";
         String mhImplReadFieldName = "_mhImplRead";
         String mhImplWriteFieldName = "_mhImplWrite";
         String mhImplStartPollFieldName = "_mhImplStartPoll";
         String mhImplStopPollFieldName = "_mhImplStopPoll";
         String mhPollFieldName = "_mhPoll";
+        String mhPollFdFieldName = "_mhPollFd";
         String mhCloseFieldName = "_mhClose";
 
         ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
         ClassDesc proxyDesc = ClassDesc.of(proxyPollerClassName);
         ClassDesc objectDesc = ClassDesc.ofDescriptor("Ljava/lang/Object;");
         ClassDesc methodHandleDesc = ClassDesc.ofDescriptor("Ljava/lang/invoke/MethodHandle;");
+        ClassDesc methodTypeDesc = ClassDesc.ofDescriptor("Ljava/lang/invoke/MethodType;");
+        ClassDesc methodHandlesDesc = ClassDesc.ofDescriptor("Ljava/lang/invoke/MethodHandles;");
+        ClassDesc lookupDesc = ClassDesc.ofDescriptor("Ljava/lang/invoke/MethodHandles$Lookup;");
+        ClassDesc runtimeExceptionDesc = ClassDesc.ofDescriptor("Ljava/lang/RuntimeException;");
+        ClassDesc exceptionDesc = ClassDesc.ofDescriptor("Ljava/lang/Exception;");
+        ClassDesc threadDesc = ClassDesc.ofDescriptor("Ljava/lang/Thread;");
+        ClassDesc classDesc = ClassDesc.ofDescriptor("Ljava/lang/Class;");
+        ClassDesc classLoaderDesc = ClassDesc.ofDescriptor("Ljava/lang/ClassLoader;");
+
         ClassDesc intDesc = ClassDesc.ofDescriptor("I");
         ClassDesc longDesc = ClassDesc.ofDescriptor("J");
         ClassDesc booleanDesc = ClassDesc.ofDescriptor("Z");
@@ -170,10 +221,29 @@ final class AgentBytecodeToolkit {
         MethodTypeDesc implStartDesc = MethodTypeDesc.ofDescriptor("(I)V");
         MethodTypeDesc implStopDesc = MethodTypeDesc.ofDescriptor("(IZ)V");
         MethodTypeDesc pollDesc = MethodTypeDesc.ofDescriptor("(I)I");
+        MethodTypeDesc pollFdDesc = MethodTypeDesc.ofDescriptor("(IIJLjava/util/function/BooleanSupplier;)V");
         MethodTypeDesc closeDesc = MethodTypeDesc.ofDescriptor("()V");
+
+        MethodTypeDesc mhImplReadInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I[BIIJLjava/util/function/BooleanSupplier;)I");
+        MethodTypeDesc mhImplWriteInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I[BIILjava/util/function/BooleanSupplier;)I");
+        MethodTypeDesc mhImplStartInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)V");
+        MethodTypeDesc mhImplStopInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
+        MethodTypeDesc mhPollInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)I");
+        MethodTypeDesc mhPollFdInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IIJLjava/util/function/BooleanSupplier;)V");
+        MethodTypeDesc mhCloseInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)V");
+        MethodTypeDesc mhCtorInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;");
 
         return classFile.build(proxyDesc, classBuilder -> {
             classBuilder.withSuperclass(ClassDesc.of("sun.nio.ch", "Poller"));
+
+            classBuilder.withField(pollerInstanceFieldName, objectDesc, fieldBuilder ->
+                    fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.FINAL));
+
+            classBuilder.withField(mhCtorFieldName, methodHandleDesc, fieldBuilder ->
+                    fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
+
+            classBuilder.withField(mhAdaptorCtorFieldName, methodHandleDesc, fieldBuilder ->
+                    fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
 
             classBuilder.withField(mhImplReadFieldName, methodHandleDesc, fieldBuilder ->
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
@@ -185,35 +255,209 @@ final class AgentBytecodeToolkit {
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
             classBuilder.withField(mhPollFieldName, methodHandleDesc, fieldBuilder ->
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
+            classBuilder.withField(mhPollFdFieldName, methodHandleDesc, fieldBuilder ->
+                    fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
             classBuilder.withField(mhCloseFieldName, methodHandleDesc, fieldBuilder ->
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
 
-            classBuilder.withMethod(ConstantDescs.INIT_NAME, ConstantDescs.MTD_void, 0, methodBuilder -> {
-                methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
-                methodBuilder.withCode(cb -> {
-                    cb.aload(0);
-                    cb.invokespecial(ClassDesc.of("sun.nio.ch", "Poller"), ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
-                    cb.return_();
-                });
-            });
+            classBuilder.withMethod(ConstantDescs.INIT_NAME,
+                    MethodTypeDesc.of(ConstantDescs.CD_void, objectDesc),
+                    AccessFlag.PUBLIC.mask(),
+                    methodBuilder -> {
+                        methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                        methodBuilder.withCode(cb -> {
+                            cb.aload(0);
+                            cb.invokespecial(ClassDesc.of("sun.nio.ch", "Poller"), ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
+                            cb.aload(0);
+                            cb.getstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
+                            cb.getstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
+                            cb.aload(1);
+                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhCtorInvokeDesc);
+                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhCtorInvokeDesc);
+                            cb.putfield(proxyDesc, pollerInstanceFieldName, objectDesc);
+                            cb.return_();
+                        });
+                    });
 
             classBuilder.withMethod(ConstantDescs.CLASS_INIT_NAME, ConstantDescs.MTD_void, AccessFlag.STATIC.mask(), methodBuilder ->
-                    methodBuilder.withCode(codeBuilder -> emitJdkPollerProxyClinit(codeBuilder, proxyDesc, objectDesc,
-                            methodHandleDesc, intDesc, longDesc, booleanDesc, voidDesc, byteArrayDesc,
-                            booleanSupplierDesc, mhImplReadFieldName, mhImplWriteFieldName, mhImplStartPollFieldName,
-                            mhImplStopPollFieldName, mhPollFieldName, mhCloseFieldName, pollerImplClass)));
+                    methodBuilder.withCode(codeBuilder -> {
+                        // static { findVirtual + asType, 不做 bindTo }
+                        Label tryStart = codeBuilder.newLabel();
+                        Label tryEnd = codeBuilder.newLabel();
+                        Label catchLabel = codeBuilder.newLabel();
+                        Label returnLabel = codeBuilder.newLabel();
+
+                        codeBuilder.labelBinding(tryStart);
+                        codeBuilder.invokestatic(threadDesc, "currentThread", MethodTypeDesc.ofDescriptor("()Ljava/lang/Thread;"));
+                        codeBuilder.invokevirtual(threadDesc, "getContextClassLoader", MethodTypeDesc.ofDescriptor("()Ljava/lang/ClassLoader;"));
+                        codeBuilder.astore(0);
+
+                        // if (cl == null) cl = ClassLoader.getSystemClassLoader();
+                        Label hasCl = codeBuilder.newLabel();
+                        codeBuilder.aload(0);
+                        codeBuilder.ifnonnull(hasCl);
+                        codeBuilder.invokestatic(classLoaderDesc, "getSystemClassLoader", MethodTypeDesc.ofDescriptor("()Ljava/lang/ClassLoader;"));
+                        codeBuilder.astore(0);
+                        codeBuilder.labelBinding(hasCl);
+
+                        codeBuilder.ldc(pollerImplClass);
+                        codeBuilder.iconst_1();
+                        codeBuilder.aload(0);
+                        codeBuilder.invokestatic(classDesc, "forName", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"));
+                        codeBuilder.astore(1);
+
+                        codeBuilder.invokestatic(methodHandlesDesc, "publicLookup", MethodTypeDesc.ofDescriptor("()Ljava/lang/invoke/MethodHandles$Lookup;"));
+                        codeBuilder.astore(2);
+
+                        // _mhAdaptorCtor: new io.github.dreamlike.JdkVirtualThreadPollerAdaptor(jdkPoller)
+                        codeBuilder.ldc(JDK_POLLER_ADAPTOR_CLASS_NAME);
+                        codeBuilder.iconst_1();
+                        codeBuilder.aload(0);
+                        codeBuilder.invokestatic(classDesc, "forName", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"));
+                        codeBuilder.astore(4);
+
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(4);
+                        codeBuilder.invokevirtual(classDesc, "getConstructors", MethodTypeDesc.ofDescriptor("()[Ljava/lang/reflect/Constructor;"));
+                        codeBuilder.iconst_0();
+                        codeBuilder.aaload();
+                        codeBuilder.invokevirtual(lookupDesc, "unreflectConstructor",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/reflect/Constructor;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, objectDesc, objectDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
+
+                        // _mhCtor = lookup.unreflectConstructor(customerPollerClass.getConstructors()[0])
+                        //              .asType(MethodType.methodType(Object.class, Object.class))
+                        ClassDesc constructorDesc = ClassDesc.ofDescriptor("Ljava/lang/reflect/Constructor;");
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.invokevirtual(classDesc, "getConstructors", MethodTypeDesc.ofDescriptor("()[Ljava/lang/reflect/Constructor;"));
+                        codeBuilder.iconst_0();
+                        codeBuilder.aaload();
+                        codeBuilder.invokevirtual(lookupDesc, "unreflectConstructor",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/reflect/Constructor;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, objectDesc, objectDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
+
+                        // _mhImplRead
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("implRead");
+                        emitMethodType(codeBuilder, intDesc, intDesc, byteArrayDesc, intDesc, intDesc, longDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, intDesc, objectDesc, intDesc, byteArrayDesc, intDesc, intDesc, longDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhImplReadFieldName, methodHandleDesc);
+
+                        // _mhImplWrite
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("implWrite");
+                        emitMethodType(codeBuilder, intDesc, intDesc, byteArrayDesc, intDesc, intDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, intDesc, objectDesc, intDesc, byteArrayDesc, intDesc, intDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhImplWriteFieldName, methodHandleDesc);
+
+                        // _mhImplStartPoll
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("implStartPoll");
+                        emitMethodType(codeBuilder, voidDesc, intDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, voidDesc, objectDesc, intDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhImplStartPollFieldName, methodHandleDesc);
+
+                        // _mhImplStopPoll
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("implStopPoll");
+                        emitMethodType(codeBuilder, voidDesc, intDesc, booleanDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, voidDesc, objectDesc, intDesc, booleanDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhImplStopPollFieldName, methodHandleDesc);
+
+                        // _mhPoll(int timeout)
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("poll");
+                        emitMethodType(codeBuilder, intDesc, intDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, intDesc, objectDesc, intDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhPollFieldName, methodHandleDesc);
+
+                        // _mhPollFd(int fdVal, int event, long nanos, BooleanSupplier isOpen)
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("poll");
+                        emitMethodType(codeBuilder, voidDesc, intDesc, intDesc, longDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, voidDesc, objectDesc, intDesc, intDesc, longDesc, booleanSupplierDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhPollFdFieldName, methodHandleDesc);
+
+                        // _mhClose
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("close");
+                        emitMethodType(codeBuilder, voidDesc);
+                        codeBuilder.invokevirtual(lookupDesc, "findVirtual",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, voidDesc, objectDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhCloseFieldName, methodHandleDesc);
+
+                        codeBuilder.labelBinding(tryEnd);
+                        codeBuilder.branch(Opcode.GOTO, returnLabel);
+
+                        codeBuilder.labelBinding(catchLabel);
+                        codeBuilder.astore(3);
+                        codeBuilder.new_(runtimeExceptionDesc);
+                        codeBuilder.dup();
+                        codeBuilder.ldc("init " + pollerImplClass + " fail!");
+                        codeBuilder.aload(3);
+                        codeBuilder.invokespecial(runtimeExceptionDesc, ConstantDescs.INIT_NAME,
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/String;Ljava/lang/Throwable;)V"));
+                        codeBuilder.athrow();
+
+                        codeBuilder.labelBinding(returnLabel);
+                        codeBuilder.return_();
+                        codeBuilder.exceptionCatch(tryStart, tryEnd, catchLabel, exceptionDesc);
+                    }));
 
             classBuilder.withMethod("implRead", implReadDesc, 0, methodBuilder -> {
                 methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 methodBuilder.withCode(cb -> {
                     cb.getstatic(proxyDesc, mhImplReadFieldName, methodHandleDesc);
+                    cb.aload(0);
+                    cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                     cb.iload(1);
                     cb.aload(2);
                     cb.iload(3);
                     cb.iload(4);
                     cb.lload(5);
                     cb.aload(7);
-                    cb.invokevirtual(methodHandleDesc, "invokeExact", implReadDesc);
+                    cb.invokevirtual(methodHandleDesc, "invokeExact", mhImplReadInvokeDesc);
                     cb.ireturn();
                 });
             });
@@ -222,12 +466,14 @@ final class AgentBytecodeToolkit {
                 methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 methodBuilder.withCode(cb -> {
                     cb.getstatic(proxyDesc, mhImplWriteFieldName, methodHandleDesc);
+                    cb.aload(0);
+                    cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                     cb.iload(1);
                     cb.aload(2);
                     cb.iload(3);
                     cb.iload(4);
                     cb.aload(5);
-                    cb.invokevirtual(methodHandleDesc, "invokeExact", implWriteDesc);
+                    cb.invokevirtual(methodHandleDesc, "invokeExact", mhImplWriteInvokeDesc);
                     cb.ireturn();
                 });
             });
@@ -235,32 +481,55 @@ final class AgentBytecodeToolkit {
             classBuilder.withMethod("implStartPoll", implStartDesc, 0, methodBuilder ->
                     methodBuilder.withCode(cb -> {
                         cb.getstatic(proxyDesc, mhImplStartPollFieldName, methodHandleDesc);
+                        cb.aload(0);
+                        cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                         cb.iload(1);
-                        cb.invokevirtual(methodHandleDesc, "invokeExact", implStartDesc);
+                        cb.invokevirtual(methodHandleDesc, "invokeExact", mhImplStartInvokeDesc);
                         cb.return_();
                     }));
 
             classBuilder.withMethod("implStopPoll", implStopDesc, 0, methodBuilder ->
                     methodBuilder.withCode(cb -> {
                         cb.getstatic(proxyDesc, mhImplStopPollFieldName, methodHandleDesc);
+                        cb.aload(0);
+                        cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                         cb.iload(1);
                         cb.iload(2);
-                        cb.invokevirtual(methodHandleDesc, "invokeExact", implStopDesc);
+                        cb.invokevirtual(methodHandleDesc, "invokeExact", mhImplStopInvokeDesc);
                         cb.return_();
                     }));
 
             classBuilder.withMethod("poll", pollDesc, 0, methodBuilder ->
                     methodBuilder.withCode(cb -> {
                         cb.getstatic(proxyDesc, mhPollFieldName, methodHandleDesc);
+                        cb.aload(0);
+                        cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                         cb.iload(1);
-                        cb.invokevirtual(methodHandleDesc, "invokeExact", pollDesc);
+                        cb.invokevirtual(methodHandleDesc, "invokeExact", mhPollInvokeDesc);
                         cb.ireturn();
                     }));
+
+            classBuilder.withMethod("poll", pollFdDesc, 0, methodBuilder -> {
+                methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                methodBuilder.withCode(cb -> {
+                    cb.getstatic(proxyDesc, mhPollFdFieldName, methodHandleDesc);
+                    cb.aload(0);
+                    cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
+                    cb.iload(1);
+                    cb.iload(2);
+                    cb.lload(3);
+                    cb.aload(5);
+                    cb.invokevirtual(methodHandleDesc, "invokeExact", mhPollFdInvokeDesc);
+                    cb.return_();
+                });
+            });
 
             classBuilder.withMethod("close", closeDesc, 0, methodBuilder ->
                     methodBuilder.withCode(cb -> {
                         cb.getstatic(proxyDesc, mhCloseFieldName, methodHandleDesc);
-                        cb.invokevirtual(methodHandleDesc, "invokeExact", closeDesc);
+                        cb.aload(0);
+                        cb.getfield(proxyDesc, pollerInstanceFieldName, objectDesc);
+                        cb.invokevirtual(methodHandleDesc, "invokeExact", mhCloseInvokeDesc);
                         cb.return_();
                     }));
         });
