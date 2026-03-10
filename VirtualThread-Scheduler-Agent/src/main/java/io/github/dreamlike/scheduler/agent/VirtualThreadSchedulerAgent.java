@@ -48,7 +48,8 @@ public final class VirtualThreadSchedulerAgent {
         try {
             instrumentation.addTransformer(transformer, true);
 
-            // 把 java.base 的 sun.nio.ch 包 打开 给 agent 模块（不是 export）。否则 privateLookupIn 会被模块访问检查挡住
+            // 把 java.base 的 sun.nio.ch 包 open 给 agent 模块（不是 export）；否则 privateLookupIn 会被模块访问检查挡住。
+            // Open java.base: sun.nio.ch to the agent module (not export); otherwise privateLookupIn will fail module access checks.
             Module javaBase = Object.class.getModule();
             HashSet<Module> modules = new HashSet<>();
             Module agentModule = VirtualThreadSchedulerAgent.class.getModule();
@@ -69,7 +70,8 @@ public final class VirtualThreadSchedulerAgent {
             currentLookup.defineClass(AgentBytecodeToolkit.jdkPollerToVirtualThreadPollerAdaptor());
             Class<?> anchor = Class.forName("sun.nio.ch.DefaultPollerProvider", false, null);
             MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(anchor, currentLookup);
-            // 注入一个特洛伊木马 只是为了把我的Poller带进去
+            // 注入一个“特洛伊木马”类，只是为了把自定义 Poller 相关类带进 java.base。
+            // Inject a "Trojan" class only to bring our custom Poller-related classes into java.base.
             lookup.defineClass(AgentBytecodeToolkit.jdkPollerProxy(PROXY_POLLER_CLASS_NAME, pollerImplClass));
         } catch (Throwable t) {
             System.err.println("[VirtualThreadSchedulerAgent] failed to register transformer");
@@ -108,7 +110,8 @@ public final class VirtualThreadSchedulerAgent {
         }
     }
 
-    // 入侵修改sun.nio.ch.DefaultPollerProvider
+    // 入侵/改写 sun.nio.ch.DefaultPollerProvider。
+    // Patch/Rewrite sun.nio.ch.DefaultPollerProvider.
     private static byte[] spiPollerProvider(byte[] defaultPollerProviderBytecode) {
         ClassFile classFile = ClassFile.of();
         ClassModel defaultPollerProviderCodeModel = classFile.parse(defaultPollerProviderBytecode);
@@ -117,8 +120,10 @@ public final class VirtualThreadSchedulerAgent {
         return classFile.build(providerDesc, classBuilder -> {
             for (ClassElement classElement : defaultPollerProviderCodeModel) {
                 if (classElement instanceof MethodModel methodModel) {
-                    //  read poller和write poller都强制设置为1
-                    // supportReadOps和supportWriteOps都强制返回true 允许使用“async”方案
+                    // read/write poller 数量都强制设置为 1。
+                    // Force read/write poller count to 1.
+                    // supportReadOps/supportWriteOps 都强制返回 true，允许使用 "async" 方案。
+                    // Force supportReadOps/supportWriteOps to return true to enable the "async" mode.
                     boolean needSkip = switch (methodModel.methodName().stringValue()) {
                         case "defaultReadPollers" ->
                                 returnOneOrTrue(classBuilder.constantPool().utf8Entry("defaultReadPollers"), classBuilder.constantPool().utf8Entry("()I"), 0, classBuilder);
@@ -144,9 +149,8 @@ public final class VirtualThreadSchedulerAgent {
             MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)V");
             ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
 
-            // Poller readPoller(boolean subPoller) throws IOException {
-            //     return new sun.nio.ch.JdkPollerProxy(readPoller0(subPoller));
-            // }
+            // 读 Poller：先调用 readPoller0，再用 JdkPollerProxy 包装，并传入 mode=1。
+            // Read poller: call readPoller0 first, then wrap with JdkPollerProxy and pass mode=1.
             classBuilder.withMethod("readPoller", pollerFactoryDesc, 0, mb -> {
                 mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 mb.withCode(cb -> {
@@ -161,9 +165,8 @@ public final class VirtualThreadSchedulerAgent {
                 });
             });
 
-            // Poller writePoller(boolean subPoller) throws IOException {
-            //     return new sun.nio.ch.JdkPollerProxy(writePoller0(subPoller));
-            // }
+            // 写 Poller：先调用 writePoller0，再用 JdkPollerProxy 包装，并传入 mode=2。
+            // Write poller: call writePoller0 first, then wrap with JdkPollerProxy and pass mode=2.
             classBuilder.withMethod("writePoller", pollerFactoryDesc, 0, mb -> {
                 mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 mb.withCode(cb -> {

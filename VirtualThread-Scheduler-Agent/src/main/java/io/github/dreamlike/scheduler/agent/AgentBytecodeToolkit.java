@@ -8,13 +8,11 @@ import java.lang.classfile.attribute.ExceptionsAttribute;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
 import java.lang.constant.MethodTypeDesc;
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.reflect.AccessFlag;
 
 final class AgentBytecodeToolkit {
 
+    // 必须和 VirtualThreadPoller 在同一个包下，才能用 Lookup#defineClass 定义。
     // Must be in the same package as VirtualThreadPoller for Lookup#defineClass.
     static final String JDK_POLLER_ADAPTOR_CLASS_NAME = "io.github.dreamlike.scheduler.agent.JdkVirtualThreadPollerAdaptor";
     static final String CORE_POLLER_INTERFACE_NAME = "io.github.dreamlike.VirtualThreadPoller";
@@ -40,6 +38,7 @@ final class AgentBytecodeToolkit {
         String mhImplStopPollFieldName = "_mhImplStopPoll";
         String mhPollTimeoutFieldName = "_mhPoll";
         String mhCloseFieldName = "_mhClose";
+        // 当前 JDK Poller 可能不暴露 poll(fd,event,nanos,isOpen) 这个签名。
         // Current JDK Poller may not expose poll(fd,event,nanos,isOpen).
 
         return classFile.build(thisClassDesc, classBuilder -> {
@@ -75,7 +74,8 @@ final class AgentBytecodeToolkit {
             );
 
             classBuilder.withMethodBody(ConstantDescs.CLASS_INIT_NAME, ConstantDescs.MTD_void, AccessFlag.STATIC.mask(), cb -> {
-                // static { Lookup l = MethodHandles.privateLookupIn(Poller.class, MethodHandles.lookup()); ... }
+                // 静态初始化：只 resolve 一次 MethodHandle，后续 invokeExact。
+                // Static init: resolve MethodHandles once, then use invokeExact.
                 Label tryStart = cb.newLabel();
                 Label tryEnd = cb.newLabel();
                 Label catchLabel = cb.newLabel();
@@ -90,7 +90,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;"));
                 cb.astore(1);
 
-                // _mhImplRead
+                // _mhImplRead：implRead 的 MethodHandle。
+                // _mhImplRead: MethodHandle for implRead.
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("implRead");
@@ -100,7 +101,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhImplReadFieldName, methodHandleDesc);
 
-                // _mhImplWrite
+                // _mhImplWrite：implWrite 的 MethodHandle。
+                // _mhImplWrite: MethodHandle for implWrite.
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("implWrite");
@@ -110,7 +112,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhImplWriteFieldName, methodHandleDesc);
 
-                // _mhImplStartPoll
+                // _mhImplStartPoll：implStartPoll 的 MethodHandle。
+                // _mhImplStartPoll: MethodHandle for implStartPoll.
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("implStartPoll");
@@ -119,7 +122,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhImplStartPollFieldName, methodHandleDesc);
 
-                // _mhImplStopPoll
+                // _mhImplStopPoll：implStopPoll 的 MethodHandle。
+                // _mhImplStopPoll: MethodHandle for implStopPoll.
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("implStopPoll");
@@ -128,7 +132,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhImplStopPollFieldName, methodHandleDesc);
 
-                // _mhPoll(timeout)
+                // _mhPoll(timeout)：poll(int timeout) 的 MethodHandle。
+                // _mhPoll(timeout): MethodHandle for poll(int timeout).
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("poll");
@@ -137,7 +142,8 @@ final class AgentBytecodeToolkit {
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhPollTimeoutFieldName, methodHandleDesc);
 
-                // _mhClose
+                // _mhClose：close 的 MethodHandle。
+                // _mhClose: MethodHandle for close.
                 cb.aload(1);
                 cb.ldc(pollerDesc);
                 cb.ldc("close");
@@ -263,7 +269,8 @@ final class AgentBytecodeToolkit {
         });
     }
 
-    // jdkPollerProxy差不多是
+    // jdkPollerProxy 差不多是下面这个结构。
+    // jdkPollerProxy is roughly like the following.
     // package sun.nio.ch.JdkPollerProxy;
     // class JdkPollerProxy extends sun.nio.ch.Poller {
     //     static final Methodhandle CustomerPollerCtor;
