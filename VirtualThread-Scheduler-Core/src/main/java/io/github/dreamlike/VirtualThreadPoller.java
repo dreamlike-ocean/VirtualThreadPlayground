@@ -35,5 +35,5 @@ public interface VirtualThreadPoller {
     default void close() throws IOException {
 
     }
-    abstract void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException;
+
 }

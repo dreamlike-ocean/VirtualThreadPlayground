@@ -20,9 +20,4 @@ public class CustomerVirtualThreadPoller extends AbstractVirtualThreadPoller {
     public int implWrite(int fdVal, byte[] b, int off, int len, BooleanSupplier isOpen) throws IOException {
         return 0;
     }
-
-    @Override
-    public void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException {
-
-    }
 }
