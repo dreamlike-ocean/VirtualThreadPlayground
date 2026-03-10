@@ -340,7 +340,8 @@ final class AgentBytecodeToolkit {
         MethodTypeDesc mhImplStopInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
         MethodTypeDesc mhPollInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)I");
         MethodTypeDesc mhCloseInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)V");
-        MethodTypeDesc mhCtorInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;");
+        MethodTypeDesc mhAdaptorCtorInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)Ljava/lang/Object;");
+        MethodTypeDesc mhCustomerCtorInvokeDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)Ljava/lang/Object;");
 
         return classFile.build(proxyDesc, classBuilder -> {
             classBuilder.withSuperclass(ClassDesc.of("sun.nio.ch", "Poller"));
@@ -368,7 +369,7 @@ final class AgentBytecodeToolkit {
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
 
             classBuilder.withMethod(ConstantDescs.INIT_NAME,
-                    MethodTypeDesc.of(ConstantDescs.CD_void, objectDesc),
+                    MethodTypeDesc.of(ConstantDescs.CD_void, objectDesc, ConstantDescs.CD_int),
                     AccessFlag.PUBLIC.mask(),
                     methodBuilder -> {
                         methodBuilder.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
@@ -379,8 +380,9 @@ final class AgentBytecodeToolkit {
                             cb.getstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
                             cb.getstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
                             cb.aload(1);
-                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhCtorInvokeDesc);
-                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhCtorInvokeDesc);
+                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhAdaptorCtorInvokeDesc);
+                            cb.iload(2);
+                            cb.invokevirtual(methodHandleDesc, "invokeExact", mhCustomerCtorInvokeDesc);
                             cb.putfield(proxyDesc, pollerInstanceFieldName, objectDesc);
                             cb.return_();
                         });
@@ -445,7 +447,7 @@ final class AgentBytecodeToolkit {
                         codeBuilder.aaload();
                         codeBuilder.invokevirtual(lookupDesc, "unreflectConstructor",
                                 MethodTypeDesc.ofDescriptor("(Ljava/lang/reflect/Constructor;)Ljava/lang/invoke/MethodHandle;"));
-                        emitMethodType(codeBuilder, objectDesc, objectDesc);
+                        emitMethodType(codeBuilder, objectDesc, objectDesc, intDesc);
                         codeBuilder.invokevirtual(methodHandleDesc, "asType",
                                 MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                         codeBuilder.putstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);

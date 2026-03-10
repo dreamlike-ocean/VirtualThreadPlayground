@@ -141,7 +141,7 @@ public final class VirtualThreadSchedulerAgent {
 
             ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
             MethodTypeDesc pollerFactoryDesc = MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;");
-            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;)V");
+            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)V");
             ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
 
             // Poller readPoller(boolean subPoller) throws IOException {
@@ -155,6 +155,7 @@ public final class VirtualThreadSchedulerAgent {
                     cb.aload(0);
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "readPoller0", pollerFactoryDesc);
+                    cb.iconst_1();
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
                     cb.areturn();
                 });
@@ -171,6 +172,7 @@ public final class VirtualThreadSchedulerAgent {
                     cb.aload(0);
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "writePoller0", pollerFactoryDesc);
+                    cb.iconst_2();
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
                     cb.areturn();
                 });
@@ -193,31 +195,5 @@ public final class VirtualThreadSchedulerAgent {
     private static boolean moveToInternal(MethodModel method, ClassBuilder classBuilder) {
         classBuilder.withMethod(method.methodName().stringValue() + "0", method.methodTypeSymbol(), method.flags().flagsMask(), mb -> mb.transform(method, MethodTransform.ACCEPT_ALL));
         return true;
-    }
-
-    private static void jdkPoller(String methodName, ClassBuilder classBuilder) {
-        classBuilder.withMethod(methodName, MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;"), 0, mb -> {
-            mb.withCode(cb -> {
-                cb.invokestatic(ClassDesc.ofDescriptor("Lsun/nio/ch/DefaultPollerProvider;"), "spiPoller", MethodTypeDesc.ofDescriptor("()Lsun/nio/ch/Poller;"));
-                cb.areturn();
-            });
-            mb.with(ExceptionsAttribute.ofSymbols(ClassDesc.ofDescriptor("Ljava/io/IOException;")));
-        });
-    }
-
-    private static void spiPoller(ClassBuilder classBuilder) {
-        classBuilder.withMethod("spiPoller",
-                MethodTypeDesc.ofDescriptor("()Lsun/nio/ch/Poller;"),
-                AccessFlag.STATIC.mask() | AccessFlag.PUBLIC.mask(), mb -> {
-                    mb.with(ExceptionsAttribute.ofSymbols(ClassDesc.ofDescriptor("Ljava/io/IOException;")));
-                    mb.withCode(cb -> {
-                        // 直接new一个sun.nio.ch.JdkPollerProxy#JdkPollerProxy
-                        ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
-                        cb.new_(proxyDesc);
-                        cb.dup();
-                        cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
-                        cb.areturn();
-                    });
-                });
     }
 }

@@ -7,8 +7,9 @@ import java.io.IOException;
 import java.util.function.BooleanSupplier;
 
 public class CustomerVirtualThreadPoller extends AbstractVirtualThreadPoller {
-    public CustomerVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller) {
-        super(jdkVirtualThreadPoller);
+
+    public CustomerVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode) {
+        super(jdkVirtualThreadPoller, mode);
     }
 
     @Override

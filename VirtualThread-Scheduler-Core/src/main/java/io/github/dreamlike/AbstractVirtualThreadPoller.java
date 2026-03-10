@@ -4,10 +4,14 @@ import java.io.IOException;
 import java.util.function.BooleanSupplier;
 
 public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller {
+    protected static final int READ_MODE = 1;
+    protected static final int WRITE_MODE = 2;
     protected final VirtualThreadPoller jdkVirtualThreadPoller;
+    protected final int mode;
 
-    protected AbstractVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller) {
+    protected AbstractVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode) {
         this.jdkVirtualThreadPoller = jdkVirtualThreadPoller;
+        this.mode = mode;
     }
 
     @Override
@@ -40,5 +44,13 @@ public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller
     @Override
     public void close() throws IOException {
         jdkVirtualThreadPoller.close();
+    }
+
+    protected final boolean isReadMode() {
+        return (mode & READ_MODE) != 0;
+    }
+
+    protected final boolean isWriteMode() {
+        return (mode & WRITE_MODE) != 0;
     }
 }
