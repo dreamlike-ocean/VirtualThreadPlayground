@@ -1,11 +1,16 @@
 package io.github.dreamlike.scheduler.example;
 
-import io.github.dreamlike.Poller;
+import io.github.dreamlike.AbstractVirtualThreadPoller;
+import io.github.dreamlike.VirtualThreadPoller;
 
 import java.io.IOException;
 import java.util.function.BooleanSupplier;
 
-public class CustomerPoller implements Poller {
+public class CustomerVirtualThreadPoller extends AbstractVirtualThreadPoller {
+    public CustomerVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller) {
+        super(jdkVirtualThreadPoller);
+    }
+
     @Override
     public int implRead(int fdVal, byte[] b, int off, int len, long nanos, BooleanSupplier isOpen) throws IOException {
         return 0;
@@ -17,8 +22,7 @@ public class CustomerPoller implements Poller {
     }
 
     @Override
-    public int poll(int timeout) {
-        System.out.println("poll do nothing");
-        throw new RuntimeException("poll do nothing");
+    public void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException {
+
     }
 }
