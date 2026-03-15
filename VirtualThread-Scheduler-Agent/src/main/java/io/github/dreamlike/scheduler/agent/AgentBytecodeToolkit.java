@@ -445,9 +445,61 @@ final class AgentBytecodeToolkit {
                                 MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                         codeBuilder.putstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
 
-                        // _mhCtor = lookup.unreflectConstructor(customerPollerClass.getConstructors()[0])
-                        //              .asType(MethodType.methodType(Object.class, Object.class))
-                        ClassDesc constructorDesc = ClassDesc.ofDescriptor("Ljava/lang/reflect/Constructor;");
+                        // 优先查找静态工厂方法 acquire(VirtualThreadPoller, int mode, boolean subPoller)。
+                        // Prefer static factory acquire(VirtualThreadPoller, int mode, boolean subPoller).
+                        // 找不到则 fallback 到单构造器 (VirtualThreadPoller, int, boolean)。
+                        // If not found, fallback to 1-ctor (VirtualThreadPoller, int, boolean).
+
+                        // VirtualThreadPoller interface class
+                        codeBuilder.ldc(CORE_POLLER_INTERFACE_NAME);
+                        codeBuilder.iconst_1();
+                        codeBuilder.aload(0);
+                        codeBuilder.invokestatic(classDesc, "forName", MethodTypeDesc.ofDescriptor("(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"));
+                        codeBuilder.astore(5);
+
+                        Label creatorTryStart = codeBuilder.newLabel();
+                        Label creatorTryEnd = codeBuilder.newLabel();
+                        Label creatorCatch = codeBuilder.newLabel();
+                        Label creatorDone = codeBuilder.newLabel();
+
+                        // try { _mhCtor = lookup.unreflect(customerClass.getMethod("acquire", ...)).asType(...); }
+                        codeBuilder.labelBinding(creatorTryStart);
+                        codeBuilder.aload(1);
+                        codeBuilder.ldc("acquire");
+                        emitIntConst(codeBuilder, 3);
+                        codeBuilder.anewarray(classDesc);
+                        codeBuilder.dup();
+                        codeBuilder.iconst_0();
+                        codeBuilder.aload(5);
+                        codeBuilder.aastore();
+                        codeBuilder.dup();
+                        codeBuilder.iconst_1();
+                        codeBuilder.ldc(intDesc);
+                        codeBuilder.aastore();
+                        codeBuilder.dup();
+                        codeBuilder.iconst_2();
+                        codeBuilder.ldc(booleanDesc);
+                        codeBuilder.aastore();
+                        codeBuilder.invokevirtual(classDesc, "getMethod",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"));
+                        codeBuilder.astore(6);
+
+                        codeBuilder.aload(2);
+                        codeBuilder.aload(6);
+                        codeBuilder.invokevirtual(lookupDesc, "unreflect",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/reflect/Method;)Ljava/lang/invoke/MethodHandle;"));
+                        emitMethodType(codeBuilder, objectDesc, objectDesc, intDesc, booleanDesc);
+                        codeBuilder.invokevirtual(methodHandleDesc, "asType",
+                                MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                        codeBuilder.putstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
+
+                        codeBuilder.labelBinding(creatorTryEnd);
+                        codeBuilder.branch(Opcode.GOTO, creatorDone);
+
+                        // catch (Exception ignored) { fallback to ctor }
+                        codeBuilder.labelBinding(creatorCatch);
+                        codeBuilder.astore(6);
+
                         codeBuilder.aload(2);
                         codeBuilder.aload(1);
                         codeBuilder.invokevirtual(classDesc, "getConstructors", MethodTypeDesc.ofDescriptor("()[Ljava/lang/reflect/Constructor;"));
@@ -459,6 +511,9 @@ final class AgentBytecodeToolkit {
                         codeBuilder.invokevirtual(methodHandleDesc, "asType",
                                 MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                         codeBuilder.putstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
+
+                        codeBuilder.labelBinding(creatorDone);
+                        codeBuilder.exceptionCatch(creatorTryStart, creatorTryEnd, creatorCatch, exceptionDesc);
 
                         // _mhImplRead
                         codeBuilder.aload(2);
