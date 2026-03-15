@@ -19,10 +19,14 @@ import java.util.stream.Stream;
 public final class VirtualThreadSchedulerAgent {
 
     private static final String POLL_IMPL_CLASS = "jdk.virtualThreadScheduler.poller.implClass";
+    private static final String SUPPORT_READ_OPS = "jdk.virtualThreadScheduler.poller.supportReadOps";
+    private static final String SUPPORT_WRITE_OPS = "jdk.virtualThreadScheduler.poller.supportWriteOps";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean();
     private static final String PROXY_POLLER_CLASS_NAME = "sun.nio.ch.JdkPollerProxy";
     private static final Map<String, String> args = new HashMap<>();
     private static String pollerImplClass = null;
+    private static boolean supportReadOps = true;
+    private static boolean supportWriteOps = true;
 
     private VirtualThreadSchedulerAgent() {
     }
@@ -40,7 +44,6 @@ public final class VirtualThreadSchedulerAgent {
             return;
         }
         initArgs(agentArgs);
-        System.setProperty("jdk.pollerMode", "1");
         ClassFileTransformer transformer = new PollerRewriteTransformer();
         System.out.println("[VirtualThreadSchedulerAgent] installing agent; retransform support = "
                 + instrumentation.isRetransformClassesSupported());
@@ -93,6 +96,20 @@ public final class VirtualThreadSchedulerAgent {
         if (pollerImplClass == null) {
             throw new NullPointerException(POLL_IMPL_CLASS + " is null");
         }
+
+        supportReadOps = parseBooleanArg(args.get(SUPPORT_READ_OPS), true);
+        supportWriteOps = parseBooleanArg(args.get(SUPPORT_WRITE_OPS), true);
+    }
+
+    private static boolean parseBooleanArg(String value, boolean defaultValue) {
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "1", "true", "yes", "y", "on" -> true;
+            case "0", "false", "no", "n", "off" -> false;
+            default -> defaultValue;
+        };
     }
 
     private static final class PollerRewriteTransformer implements ClassFileTransformer {
@@ -120,19 +137,13 @@ public final class VirtualThreadSchedulerAgent {
         return classFile.build(providerDesc, classBuilder -> {
             for (ClassElement classElement : defaultPollerProviderCodeModel) {
                 if (classElement instanceof MethodModel methodModel) {
-                    // read/write poller 数量都强制设置为 1。
-                    // Force read/write poller count to 1.
-                    // supportReadOps/supportWriteOps 都强制返回 true，允许使用 "async" 方案。
-                    // Force supportReadOps/supportWriteOps to return true to enable the "async" mode.
+                    // supportReadOps/supportWriteOps 按 agentArgs 配置返回 true/false，用于控制是否启用 "async" 方案。
+                    // supportReadOps/supportWriteOps return true/false based on agentArgs to control whether "async" mode is enabled.
                     boolean needSkip = switch (methodModel.methodName().stringValue()) {
-                        case "defaultReadPollers" ->
-                                returnOneOrTrue(classBuilder.constantPool().utf8Entry("defaultReadPollers"), classBuilder.constantPool().utf8Entry("()I"), 0, classBuilder);
-                        case "defaultWritePollers" ->
-                                returnOneOrTrue(classBuilder.constantPool().utf8Entry("defaultWritePollers"), classBuilder.constantPool().utf8Entry("()I"), 0, classBuilder);
                         case "supportReadOps" ->
-                                returnOneOrTrue(classBuilder.constantPool().utf8Entry("supportReadOps"), classBuilder.constantPool().utf8Entry("()Z"), 0, classBuilder);
+                                returnConst(classBuilder.constantPool().utf8Entry("supportReadOps"), classBuilder.constantPool().utf8Entry("()Z"), supportReadOps ? 1 : 0, 0, classBuilder);
                         case "supportWriteOps" ->
-                                returnOneOrTrue(classBuilder.constantPool().utf8Entry("supportWriteOps"), classBuilder.constantPool().utf8Entry("()Z"), 0, classBuilder);
+                                returnConst(classBuilder.constantPool().utf8Entry("supportWriteOps"), classBuilder.constantPool().utf8Entry("()Z"), supportWriteOps ? 1 : 0, 0, classBuilder);
                         case "readPoller", "writePoller" ->
                             moveToInternal(methodModel, classBuilder);
                         default -> false;
@@ -146,7 +157,7 @@ public final class VirtualThreadSchedulerAgent {
 
             ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
             MethodTypeDesc pollerFactoryDesc = MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;");
-            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;I)V");
+            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
             ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
 
             // 读 Poller：先调用 readPoller0，再用 JdkPollerProxy 包装，并传入 mode=1。
@@ -160,6 +171,7 @@ public final class VirtualThreadSchedulerAgent {
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "readPoller0", pollerFactoryDesc);
                     cb.iconst_1();
+                    cb.iload(1);
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
                     cb.areturn();
                 });
@@ -176,6 +188,7 @@ public final class VirtualThreadSchedulerAgent {
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "writePoller0", pollerFactoryDesc);
                     cb.iconst_2();
+                    cb.iload(1);
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
                     cb.areturn();
                 });
@@ -183,12 +196,18 @@ public final class VirtualThreadSchedulerAgent {
         });
     }
 
-    private static boolean returnOneOrTrue(Utf8Entry name,
-                                           Utf8Entry descriptor,
-                                           int methodFlags, ClassBuilder classBuilder) {
+    private static boolean returnConst(Utf8Entry name,
+                                       Utf8Entry descriptor,
+                                       int constant,
+                                       int methodFlags,
+                                       ClassBuilder classBuilder) {
         classBuilder.withMethod(name, descriptor, methodFlags, mb -> {
             mb.withCode(cb -> {
-                cb.iconst_1();
+                if (constant == 0) {
+                    cb.iconst_0();
+                } else {
+                    cb.iconst_1();
+                }
                 cb.ireturn();
             });
         });

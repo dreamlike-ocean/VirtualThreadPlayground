@@ -8,8 +8,8 @@ import java.util.function.BooleanSupplier;
 
 public class CustomerVirtualThreadPoller extends AbstractVirtualThreadPoller {
 
-    public CustomerVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode) {
-        super(jdkVirtualThreadPoller, mode);
+    public CustomerVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode, boolean subPoller) {
+        super(jdkVirtualThreadPoller, mode, subPoller);
     }
 
     @Override

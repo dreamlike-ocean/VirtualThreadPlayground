@@ -8,10 +8,12 @@ public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller
     protected static final int WRITE_MODE = 2;
     protected final VirtualThreadPoller jdkVirtualThreadPoller;
     protected final int mode;
+    protected final boolean subPoller;
 
-    protected AbstractVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode) {
+    protected AbstractVirtualThreadPoller(VirtualThreadPoller jdkVirtualThreadPoller, int mode, boolean subPoller) {
         this.jdkVirtualThreadPoller = jdkVirtualThreadPoller;
         this.mode = mode;
+        this.subPoller = subPoller;
     }
 
     @Override
@@ -52,5 +54,9 @@ public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller
 
     protected final boolean isWriteMode() {
         return (mode & WRITE_MODE) != 0;
+    }
+
+    protected final boolean isSubPoller() {
+        return subPoller;
     }
 }
