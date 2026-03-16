@@ -39,13 +39,36 @@ public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller
     }
 
     @Override
-    public int poll(int timeout) throws IOException {
+    public final int poll(int timeout) throws IOException {
         return jdkVirtualThreadPoller.poll(timeout);
     }
 
     @Override
-    public void close() throws IOException {
-        jdkVirtualThreadPoller.close();
+    public final void close() throws IOException {
+        try {
+            jdkVirtualThreadPoller.close();
+        } finally {
+            close0();
+        }
+    }
+
+    @Override
+    public final int fdVal() {
+        return jdkVirtualThreadPoller.fdVal();
+    }
+
+    @Override
+    public final void pollerPolled() throws IOException {
+        jdkVirtualThreadPoller.pollerPolled();
+    }
+
+    @Override
+    public final void wakeupPoller() throws IOException {
+        jdkVirtualThreadPoller.wakeupPoller();
+    }
+
+    protected void close0() throws IOException {
+
     }
 
     protected final boolean isReadMode() {

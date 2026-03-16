@@ -36,4 +36,25 @@ public interface VirtualThreadPoller {
 
     }
 
+    /**
+     * Returns the underlying poller file descriptor value.
+     */
+    default int fdVal() {
+        throw new UnsupportedOperationException("fdVal is not supported");
+    }
+
+    /**
+     * Callback invoked when this poller's file descriptor is polled.
+     */
+    default void pollerPolled() throws IOException {
+
+    }
+
+    /**
+     * Wakes up the poller thread if blocked.
+     */
+    default void wakeupPoller() throws IOException {
+        throw new UnsupportedOperationException("wakeupPoller is not supported");
+    }
+
 }
