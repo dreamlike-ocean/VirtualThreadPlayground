@@ -37,7 +37,13 @@ final class AgentBytecodeToolkit {
                                         flags.remove(AccessFlag.FINAL);
                                         flags.add(AccessFlag.PUBLIC);
                                         fieldBuilder.withFlags(flags.toArray(AccessFlag[]::new));
-                                        fieldModel.elementList().forEach(fieldBuilder::accept);
+
+                                        for (FieldElement fieldElement : fieldModel) {
+                                            if (fieldElement instanceof AccessFlags) {
+                                                continue;
+                                            }
+                                            fieldBuilder.with(fieldElement);
+                                        }
                                     }
                             );
                             return;
@@ -78,20 +84,36 @@ final class AgentBytecodeToolkit {
             MethodTypeDesc pollerFactoryDesc = MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;");
             MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
             ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
+            ClassDesc pollerDesc = ClassDesc.ofDescriptor("Lsun/nio/ch/Poller;");
+            ClassDesc mapDesc = ClassDesc.ofDescriptor("Ljava/util/Map;");
 
             // 读 Poller：先调用 readPoller0，再用 JdkPollerProxy 包装，并传入 mode=1。
             // Read poller: call readPoller0 first, then wrap with JdkPollerProxy and pass mode=1.
             classBuilder.withMethod("readPoller", pollerFactoryDesc, 0, mb -> {
                 mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 mb.withCode(cb -> {
-                    cb.new_(proxyDesc);
-                    cb.dup();
+                    // Poller jdkReadPoller = readPoller0(subPoller)
                     cb.aload(0);
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "readPoller0", pollerFactoryDesc);
+                    cb.astore(2);
+
+                    // JdkPollerProxy proxy = new JdkPollerProxy(jdkReadPoller, 1, subPoller)
+                    cb.new_(proxyDesc);
+                    cb.dup();
+                    cb.aload(2);
                     cb.iconst_1();
                     cb.iload(1);
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
+                    cb.astore(3);
+
+                    // jdkReadPoller.map = proxy.map
+                    cb.aload(2);
+                    cb.aload(3);
+                    cb.getfield(pollerDesc, "map", mapDesc);
+                    cb.putfield(pollerDesc, "map", mapDesc);
+
+                    cb.aload(3);
                     cb.areturn();
                 });
             });
@@ -101,14 +123,28 @@ final class AgentBytecodeToolkit {
             classBuilder.withMethod("writePoller", pollerFactoryDesc, 0, mb -> {
                 mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
                 mb.withCode(cb -> {
-                    cb.new_(proxyDesc);
-                    cb.dup();
+                    // Poller jdkWritePoller = writePoller0(subPoller)
                     cb.aload(0);
                     cb.iload(1);
                     cb.invokevirtual(providerDesc, "writePoller0", pollerFactoryDesc);
+                    cb.astore(2);
+
+                    // JdkPollerProxy proxy = new JdkPollerProxy(jdkWritePoller, 2, subPoller)
+                    cb.new_(proxyDesc);
+                    cb.dup();
+                    cb.aload(2);
                     cb.iconst_2();
                     cb.iload(1);
                     cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
+                    cb.astore(3);
+
+                    // jdkWritePoller.map = proxy.map
+                    cb.aload(2);
+                    cb.aload(3);
+                    cb.getfield(pollerDesc, "map", mapDesc);
+                    cb.putfield(pollerDesc, "map", mapDesc);
+
+                    cb.aload(3);
                     cb.areturn();
                 });
             });
@@ -613,22 +649,10 @@ final class AgentBytecodeToolkit {
                             cb.aload(0);
                             cb.invokespecial(ClassDesc.of("sun.nio.ch", "Poller"), ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
 
-                            // share the same map between proxy and the underlying JDK poller
-                            // 共享 proxy 的 map 到底层 JDK poller，保证注册/解除注册在同一个 map 上工作。
-                            ClassDesc pollerDesc = ClassDesc.of("sun.nio.ch", "Poller");
-                            ClassDesc mapDesc = ClassDesc.ofDescriptor("Ljava/util/Map;");
-                            cb.aload(1);
-                            cb.checkcast(pollerDesc);
-                            cb.astore(4);
-                            cb.aload(4);
-                            cb.aload(0);
-                            cb.getfield(pollerDesc, "map", mapDesc);
-                            cb.putfield(pollerDesc, "map", mapDesc);
-
                             cb.aload(0);
                             cb.getstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
                             cb.getstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
-                            cb.aload(4);
+                            cb.aload(1);
                             cb.invokevirtual(methodHandleDesc, "invokeExact", mhAdaptorCtorInvokeDesc);
                             cb.iload(2);
                             cb.iload(3);

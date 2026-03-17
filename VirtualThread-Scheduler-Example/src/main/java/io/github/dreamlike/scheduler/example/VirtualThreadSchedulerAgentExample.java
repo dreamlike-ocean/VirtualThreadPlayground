@@ -5,8 +5,7 @@ import java.util.Scanner;
 public final class VirtualThreadSchedulerAgentExample {
 
     public static void main(String[] args) throws ClassNotFoundException {
-       Class.forName("sun.nio.ch.KQueuePoller");
+       Class.forName("sun.nio.ch.KQueuesun.nio.ch.Poller");
        new Scanner(System.in).nextLine();
     }
-
 }
