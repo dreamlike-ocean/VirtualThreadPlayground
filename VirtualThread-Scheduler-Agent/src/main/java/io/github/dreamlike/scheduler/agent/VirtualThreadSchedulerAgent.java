@@ -1,15 +1,8 @@
 package io.github.dreamlike.scheduler.agent;
 
-import java.lang.classfile.*;
-import java.lang.classfile.attribute.ExceptionsAttribute;
-import java.lang.classfile.constantpool.Utf8Entry;
-import java.lang.constant.ClassDesc;
-import java.lang.constant.ConstantDescs;
-import java.lang.constant.MethodTypeDesc;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.invoke.MethodHandles;
-import java.lang.reflect.AccessFlag;
 import java.security.ProtectionDomain;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,7 +15,7 @@ public final class VirtualThreadSchedulerAgent {
     private static final String SUPPORT_READ_OPS = "jdk.virtualThreadScheduler.poller.supportReadOps";
     private static final String SUPPORT_WRITE_OPS = "jdk.virtualThreadScheduler.poller.supportWriteOps";
     private static final AtomicBoolean INSTALLED = new AtomicBoolean();
-    private static final String PROXY_POLLER_CLASS_NAME = "sun.nio.ch.JdkPollerProxy";
+    static final String PROXY_POLLER_CLASS_NAME = "sun.nio.ch.JdkPollerProxy";
     private static final Map<String, String> args = new HashMap<>();
     private static String pollerImplClass = null;
     private static boolean supportReadOps = true;
@@ -121,101 +114,13 @@ public final class VirtualThreadSchedulerAgent {
                                 ProtectionDomain protectionDomain,
                                 byte[] classfileBuffer) {
             if (className.equals("sun/nio/ch/DefaultPollerProvider")) {
-                return spiPollerProvider(classfileBuffer);
+                return AgentBytecodeToolkit.transformPollerProvider(supportReadOps, supportWriteOps, classfileBuffer);
+            }
+            if (className.equals("sun/nio/ch/Poller")) {
+                return AgentBytecodeToolkit.transformPoller(classfileBuffer);
             }
             return classfileBuffer;
         }
     }
 
-    // 入侵/改写 sun.nio.ch.DefaultPollerProvider。
-    // Patch/Rewrite sun.nio.ch.DefaultPollerProvider.
-    private static byte[] spiPollerProvider(byte[] defaultPollerProviderBytecode) {
-        ClassFile classFile = ClassFile.of();
-        ClassModel defaultPollerProviderCodeModel = classFile.parse(defaultPollerProviderBytecode);
-        ClassDesc providerDesc = defaultPollerProviderCodeModel.thisClass().asSymbol();
-
-        return classFile.build(providerDesc, classBuilder -> {
-            for (ClassElement classElement : defaultPollerProviderCodeModel) {
-                if (classElement instanceof MethodModel methodModel) {
-                    // supportReadOps/supportWriteOps 按 agentArgs 配置返回 true/false，用于控制是否启用 "async" 方案。
-                    // supportReadOps/supportWriteOps return true/false based on agentArgs to control whether "async" mode is enabled.
-                    boolean needSkip = switch (methodModel.methodName().stringValue()) {
-                        case "supportReadOps" ->
-                                returnConst(classBuilder.constantPool().utf8Entry("supportReadOps"), classBuilder.constantPool().utf8Entry("()Z"), supportReadOps ? 1 : 0, 0, classBuilder);
-                        case "supportWriteOps" ->
-                                returnConst(classBuilder.constantPool().utf8Entry("supportWriteOps"), classBuilder.constantPool().utf8Entry("()Z"), supportWriteOps ? 1 : 0, 0, classBuilder);
-                        case "readPoller", "writePoller" ->
-                            moveToInternal(methodModel, classBuilder);
-                        default -> false;
-                    };
-                    if (needSkip) {
-                        continue;
-                    }
-                }
-                classBuilder.with(classElement);
-            }
-
-            ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
-            MethodTypeDesc pollerFactoryDesc = MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;");
-            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
-            ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
-
-            // 读 Poller：先调用 readPoller0，再用 JdkPollerProxy 包装，并传入 mode=1。
-            // Read poller: call readPoller0 first, then wrap with JdkPollerProxy and pass mode=1.
-            classBuilder.withMethod("readPoller", pollerFactoryDesc, 0, mb -> {
-                mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
-                mb.withCode(cb -> {
-                    cb.new_(proxyDesc);
-                    cb.dup();
-                    cb.aload(0);
-                    cb.iload(1);
-                    cb.invokevirtual(providerDesc, "readPoller0", pollerFactoryDesc);
-                    cb.iconst_1();
-                    cb.iload(1);
-                    cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
-                    cb.areturn();
-                });
-            });
-
-            // 写 Poller：先调用 writePoller0，再用 JdkPollerProxy 包装，并传入 mode=2。
-            // Write poller: call writePoller0 first, then wrap with JdkPollerProxy and pass mode=2.
-            classBuilder.withMethod("writePoller", pollerFactoryDesc, 0, mb -> {
-                mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
-                mb.withCode(cb -> {
-                    cb.new_(proxyDesc);
-                    cb.dup();
-                    cb.aload(0);
-                    cb.iload(1);
-                    cb.invokevirtual(providerDesc, "writePoller0", pollerFactoryDesc);
-                    cb.iconst_2();
-                    cb.iload(1);
-                    cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
-                    cb.areturn();
-                });
-            });
-        });
-    }
-
-    private static boolean returnConst(Utf8Entry name,
-                                       Utf8Entry descriptor,
-                                       int constant,
-                                       int methodFlags,
-                                       ClassBuilder classBuilder) {
-        classBuilder.withMethod(name, descriptor, methodFlags, mb -> {
-            mb.withCode(cb -> {
-                if (constant == 0) {
-                    cb.iconst_0();
-                } else {
-                    cb.iconst_1();
-                }
-                cb.ireturn();
-            });
-        });
-        return true;
-    }
-
-    private static boolean moveToInternal(MethodModel method, ClassBuilder classBuilder) {
-        classBuilder.withMethod(method.methodName().stringValue() + "0", method.methodTypeSymbol(), method.flags().flagsMask(), mb -> mb.transform(method, MethodTransform.ACCEPT_ALL));
-        return true;
-    }
 }

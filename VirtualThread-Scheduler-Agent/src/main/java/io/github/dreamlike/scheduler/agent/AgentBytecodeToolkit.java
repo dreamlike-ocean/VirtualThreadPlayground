@@ -1,14 +1,14 @@
 package io.github.dreamlike.scheduler.agent;
 
-import java.lang.classfile.ClassFile;
-import java.lang.classfile.CodeBuilder;
-import java.lang.classfile.Label;
-import java.lang.classfile.Opcode;
+import java.lang.classfile.*;
 import java.lang.classfile.attribute.ExceptionsAttribute;
+import java.lang.classfile.constantpool.Utf8Entry;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.reflect.AccessFlag;
+
+import static io.github.dreamlike.scheduler.agent.VirtualThreadSchedulerAgent.PROXY_POLLER_CLASS_NAME;
 
 final class AgentBytecodeToolkit {
 
@@ -16,7 +16,126 @@ final class AgentBytecodeToolkit {
     // Must be in the same package as VirtualThreadPoller for Lookup#defineClass.
     static final String JDK_POLLER_ADAPTOR_CLASS_NAME = "io.github.dreamlike.scheduler.agent.JdkVirtualThreadPollerAdaptor";
     static final String CORE_POLLER_INTERFACE_NAME = "io.github.dreamlike.VirtualThreadPoller";
+
     private AgentBytecodeToolkit() {
+    }
+
+    public static byte[] transformPoller(byte[] pollerBytecode) {
+        ClassFile classFile = ClassFile.of();
+        ClassModel jdkPollerClassModel = classFile.parse(pollerBytecode);
+        return classFile.transformClass(jdkPollerClassModel,
+                new ClassTransform() {
+                    @Override
+                    public void accept(ClassBuilder builder, ClassElement element) {
+                        if (element instanceof FieldModel fieldModel && fieldModel.fieldName().stringValue().equals("map")) {
+                            builder.withField(
+                                    fieldModel.fieldName().stringValue(),
+                                    fieldModel.fieldTypeSymbol(),
+                                    fieldBuilder -> {
+                                        var flags = new java.util.HashSet<>(fieldModel.flags().flags());
+                                        flags.remove(AccessFlag.PRIVATE);
+                                        flags.remove(AccessFlag.FINAL);
+                                        flags.add(AccessFlag.PUBLIC);
+                                        fieldBuilder.withFlags(flags.toArray(AccessFlag[]::new));
+                                        fieldModel.elementList().forEach(fieldBuilder::accept);
+                                    }
+                            );
+                            return;
+                        }
+                        builder.with(element);
+                    }
+                });
+    }
+
+    // 入侵/改写 sun.nio.ch.DefaultPollerProvider。
+    // Patch/Rewrite sun.nio.ch.DefaultPollerProvider.
+    public static byte[] transformPollerProvider(boolean supportReadOps, boolean supportWriteOps, byte[] defaultPollerProviderBytecode) {
+        ClassFile classFile = ClassFile.of();
+        ClassModel defaultPollerProviderCodeModel = classFile.parse(defaultPollerProviderBytecode);
+        ClassDesc providerDesc = defaultPollerProviderCodeModel.thisClass().asSymbol();
+
+        return classFile.build(providerDesc, classBuilder -> {
+            for (ClassElement classElement : defaultPollerProviderCodeModel) {
+                if (classElement instanceof MethodModel methodModel) {
+                    // supportReadOps/supportWriteOps 按 agentArgs 配置返回 true/false，用于控制是否启用 "async" 方案。
+                    // supportReadOps/supportWriteOps return true/false based on agentArgs to control whether "async" mode is enabled.
+                    boolean needSkip = switch (methodModel.methodName().stringValue()) {
+                        case "supportReadOps" ->
+                                returnConst(classBuilder.constantPool().utf8Entry("supportReadOps"), classBuilder.constantPool().utf8Entry("()Z"), supportReadOps ? 1 : 0, 0, classBuilder);
+                        case "supportWriteOps" ->
+                                returnConst(classBuilder.constantPool().utf8Entry("supportWriteOps"), classBuilder.constantPool().utf8Entry("()Z"), supportWriteOps ? 1 : 0, 0, classBuilder);
+                        case "readPoller", "writePoller" -> moveToInternal(methodModel, classBuilder);
+                        default -> false;
+                    };
+                    if (needSkip) {
+                        continue;
+                    }
+                }
+                classBuilder.with(classElement);
+            }
+
+            ClassDesc proxyDesc = ClassDesc.of(PROXY_POLLER_CLASS_NAME);
+            MethodTypeDesc pollerFactoryDesc = MethodTypeDesc.ofDescriptor("(Z)Lsun/nio/ch/Poller;");
+            MethodTypeDesc proxyCtorDesc = MethodTypeDesc.ofDescriptor("(Ljava/lang/Object;IZ)V");
+            ClassDesc ioExceptionDesc = ClassDesc.ofDescriptor("Ljava/io/IOException;");
+
+            // 读 Poller：先调用 readPoller0，再用 JdkPollerProxy 包装，并传入 mode=1。
+            // Read poller: call readPoller0 first, then wrap with JdkPollerProxy and pass mode=1.
+            classBuilder.withMethod("readPoller", pollerFactoryDesc, 0, mb -> {
+                mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                mb.withCode(cb -> {
+                    cb.new_(proxyDesc);
+                    cb.dup();
+                    cb.aload(0);
+                    cb.iload(1);
+                    cb.invokevirtual(providerDesc, "readPoller0", pollerFactoryDesc);
+                    cb.iconst_1();
+                    cb.iload(1);
+                    cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
+                    cb.areturn();
+                });
+            });
+
+            // 写 Poller：先调用 writePoller0，再用 JdkPollerProxy 包装，并传入 mode=2。
+            // Write poller: call writePoller0 first, then wrap with JdkPollerProxy and pass mode=2.
+            classBuilder.withMethod("writePoller", pollerFactoryDesc, 0, mb -> {
+                mb.with(ExceptionsAttribute.ofSymbols(ioExceptionDesc));
+                mb.withCode(cb -> {
+                    cb.new_(proxyDesc);
+                    cb.dup();
+                    cb.aload(0);
+                    cb.iload(1);
+                    cb.invokevirtual(providerDesc, "writePoller0", pollerFactoryDesc);
+                    cb.iconst_2();
+                    cb.iload(1);
+                    cb.invokespecial(proxyDesc, ConstantDescs.INIT_NAME, proxyCtorDesc);
+                    cb.areturn();
+                });
+            });
+        });
+    }
+
+    private static boolean returnConst(Utf8Entry name,
+                                       Utf8Entry descriptor,
+                                       int constant,
+                                       int methodFlags,
+                                       ClassBuilder classBuilder) {
+        classBuilder.withMethod(name, descriptor, methodFlags, mb -> {
+            mb.withCode(cb -> {
+                if (constant == 0) {
+                    cb.iconst_0();
+                } else {
+                    cb.iconst_1();
+                }
+                cb.ireturn();
+            });
+        });
+        return true;
+    }
+
+    private static boolean moveToInternal(MethodModel method, ClassBuilder classBuilder) {
+        classBuilder.withMethod(method.methodName().stringValue() + "0", method.methodTypeSymbol(), method.flags().flagsMask(), mb -> mb.transform(method, MethodTransform.ACCEPT_ALL));
+        return true;
     }
 
     static byte[] jdkPollerToVirtualThreadPollerAdaptor() {
@@ -41,6 +160,7 @@ final class AgentBytecodeToolkit {
         String mhFdValFieldName = "_mhFdVal";
         String mhPollerPolledFieldName = "_mhPollerPolled";
         String mhWakeupPollerFieldName = "_mhWakeupPoller";
+        String mhPolledFieldName = "_mhPolled";
         // 当前 JDK Poller 可能不暴露 poll(fd,event,nanos,isOpen) 这个签名。
         // Current JDK Poller may not expose poll(fd,event,nanos,isOpen).
 
@@ -66,6 +186,8 @@ final class AgentBytecodeToolkit {
             classBuilder.withField(mhPollerPolledFieldName, methodHandleDesc, fieldBuilder ->
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
             classBuilder.withField(mhWakeupPollerFieldName, methodHandleDesc, fieldBuilder ->
+                    fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
+            classBuilder.withField(mhPolledFieldName, methodHandleDesc, fieldBuilder ->
                     fieldBuilder.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC, AccessFlag.FINAL));
 
             classBuilder.withMethodBody(
@@ -190,6 +312,16 @@ final class AgentBytecodeToolkit {
                 cb.invokevirtual(lookupDesc, "findVirtual",
                         MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
                 cb.putstatic(thisClassDesc, mhWakeupPollerFieldName, methodHandleDesc);
+
+                // _mhPolled：polled(int) 的 MethodHandle。
+                // _mhPolled: MethodHandle for polled(int).
+                cb.aload(1);
+                cb.ldc(pollerDesc);
+                cb.ldc("polled");
+                emitMethodType(cb, ConstantDescs.CD_void, ConstantDescs.CD_int);
+                cb.invokevirtual(lookupDesc, "findVirtual",
+                        MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;"));
+                cb.putstatic(thisClassDesc, mhPolledFieldName, methodHandleDesc);
 
                 cb.labelBinding(tryEnd);
                 cb.branch(Opcode.GOTO, returnLabel);
@@ -341,6 +473,17 @@ final class AgentBytecodeToolkit {
                 });
             });
 
+            MethodTypeDesc polledDesc = MethodTypeDesc.of(ConstantDescs.CD_void, ConstantDescs.CD_int);
+            classBuilder.withMethodBody("polled", polledDesc, methodFlags, codeBuilder -> {
+                MethodTypeDesc invokeDesc = MethodTypeDesc.ofDescriptor("(Lsun/nio/ch/Poller;I)V");
+                codeBuilder.getstatic(thisClassDesc, mhPolledFieldName, methodHandleDesc);
+                codeBuilder.aload(0);
+                codeBuilder.getfield(thisClassDesc, jdkProxyFieldName, pollerDesc);
+                codeBuilder.iload(1);
+                codeBuilder.invokevirtual(methodHandleDesc, "invokeExact", invokeDesc);
+                codeBuilder.return_();
+            });
+
         });
     }
 
@@ -469,10 +612,23 @@ final class AgentBytecodeToolkit {
                         methodBuilder.withCode(cb -> {
                             cb.aload(0);
                             cb.invokespecial(ClassDesc.of("sun.nio.ch", "Poller"), ConstantDescs.INIT_NAME, ConstantDescs.MTD_void);
+
+                            // share the same map between proxy and the underlying JDK poller
+                            // 共享 proxy 的 map 到底层 JDK poller，保证注册/解除注册在同一个 map 上工作。
+                            ClassDesc pollerDesc = ClassDesc.of("sun.nio.ch", "Poller");
+                            ClassDesc mapDesc = ClassDesc.ofDescriptor("Ljava/util/Map;");
+                            cb.aload(1);
+                            cb.checkcast(pollerDesc);
+                            cb.astore(4);
+                            cb.aload(4);
+                            cb.aload(0);
+                            cb.getfield(pollerDesc, "map", mapDesc);
+                            cb.putfield(pollerDesc, "map", mapDesc);
+
                             cb.aload(0);
                             cb.getstatic(proxyDesc, mhCtorFieldName, methodHandleDesc);
                             cb.getstatic(proxyDesc, mhAdaptorCtorFieldName, methodHandleDesc);
-                            cb.aload(1);
+                            cb.aload(4);
                             cb.invokevirtual(methodHandleDesc, "invokeExact", mhAdaptorCtorInvokeDesc);
                             cb.iload(2);
                             cb.iload(3);

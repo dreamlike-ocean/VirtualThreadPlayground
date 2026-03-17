@@ -1,7 +1,6 @@
 package io.github.dreamlike.scheduler.example;
 
 import io.github.dreamlike.AbstractVirtualThreadPoller;
-import io.github.dreamlike.LoomSecretHelper;
 import io.github.dreamlike.VirtualThreadPoller;
 
 import java.io.IOException;

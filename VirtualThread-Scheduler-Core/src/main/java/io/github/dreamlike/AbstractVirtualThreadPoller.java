@@ -67,6 +67,11 @@ public abstract class AbstractVirtualThreadPoller implements VirtualThreadPoller
         jdkVirtualThreadPoller.wakeupPoller();
     }
 
+    @Override
+    public final void polled(int fdVal) {
+        jdkVirtualThreadPoller.polled(fdVal);
+    }
+
     protected void close0() throws IOException {
 
     }

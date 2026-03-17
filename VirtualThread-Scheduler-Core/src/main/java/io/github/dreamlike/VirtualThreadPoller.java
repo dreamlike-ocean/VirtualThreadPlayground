@@ -57,4 +57,11 @@ public interface VirtualThreadPoller {
         throw new UnsupportedOperationException("wakeupPoller is not supported");
     }
 
+    /**
+     * Callback when a file descriptor is polled.
+     */
+    default void polled(int fdVal) {
+        throw new UnsupportedOperationException("polled is not supported");
+    }
+
 }
