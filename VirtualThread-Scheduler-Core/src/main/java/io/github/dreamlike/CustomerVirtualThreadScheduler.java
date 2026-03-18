@@ -23,6 +23,11 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
     public static CustomerVirtualThreadScheduler INSTANCE;
     private static Thread.VirtualThreadScheduler jdkBuildInScheduler;
 
+    static {
+        Thread.ofVirtual()
+                .unstarted(() -> {});
+    }
+
     public CustomerVirtualThreadScheduler(Thread.VirtualThreadScheduler defaultScheduler) {
         jdkBuildInScheduler = defaultScheduler;
         INSTANCE = this;
