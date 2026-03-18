@@ -115,16 +115,10 @@ sun.nio.ch.KQueuePoller / EpollPoller / ... (real JDK poller)
 - `jdk.virtualThreadScheduler.poller.supportWriteOps`（默认 `true`）
   - 改写后的 `DefaultPollerProvider.supportWriteOps()` 返回值。
 
-## 用户 poller 的产生方式（acquire vs ctor）
+## 用户 poller 的产生方式（构造器）
 `sun.nio.ch.JdkPollerProxy` 在 `<clinit>` 阶段解析一次用户 poller 的创建方式：
 
-1) 优先查找静态工厂方法（推荐）：
-
-```java
-public static <T> T acquire(VirtualThreadPoller jdk, int mode, boolean subPoller)
-```
-
-2) 如果找不到工厂方法，则 fallback 到 public 构造器（要求“单构造器”）：
+使用 public 构造器（要求“单构造器”）：
 
 ```java
 public <T>(VirtualThreadPoller jdk, int mode, boolean subPoller)

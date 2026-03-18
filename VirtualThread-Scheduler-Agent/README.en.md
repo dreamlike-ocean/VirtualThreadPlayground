@@ -115,16 +115,10 @@ Arguments are passed via `-javaagent:...=k=v,k2=v2`.
 - `jdk.virtualThreadScheduler.poller.supportWriteOps` (default `true`)
   - Controls the rewritten `DefaultPollerProvider.supportWriteOps()` return value.
 
-## User poller instantiation (acquire vs ctor)
+## User poller instantiation (constructor)
 `sun.nio.ch.JdkPollerProxy` resolves the user poller creation strategy once in `<clinit>`:
 
-1) Prefer a static factory method:
-
-```java
-public static <T> T acquire(VirtualThreadPoller jdk, int mode, boolean subPoller)
-```
-
-2) If the factory method is not found, fallback to a public constructor (must be a single-ctor):
+It uses a public constructor (must be a single-ctor):
 
 ```java
 public <T>(VirtualThreadPoller jdk, int mode, boolean subPoller)
