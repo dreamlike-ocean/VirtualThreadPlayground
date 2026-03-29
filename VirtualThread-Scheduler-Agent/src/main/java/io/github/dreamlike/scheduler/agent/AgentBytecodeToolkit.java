@@ -13,8 +13,8 @@ import java.lang.reflect.AccessFlag;
  * Generates / transforms four targets:
  * <ol>
  *   <li>{@code transformPoller} — rewrites {@code sun.nio.ch.Poller}: renames {@code createPollerGroup}
- *       to {@code createPollerGroup0}, adds a {@code public static final Object jdkPoller} field, makes
- *       {@code POLLER_GROUP} public, and generates a new {@code createPollerGroup} that wraps the JDK
+ *       to {@code createPollerGroup0}, adds a {@code public static final Object jdkPoller} field, adds a
+ *       {@code pollerGroupForScheduler()} accessor, and generates a new {@code createPollerGroup} that wraps the JDK
  *       group with {@code JdkProxyVirtualThreadRuntime} and stores the adaptor.</li>
  *   <li>{@code jdkPollerGroupToVirtualThreadPollerAdaptor} — generates {@code JdkVirtualThreadPollerAdaptor}
  *       (in App ClassLoader) that implements {@code VirtualThreadPoller} (pure I/O) by wrapping a JDK
@@ -24,8 +24,8 @@ import java.lang.reflect.AccessFlag;
  *       {@code Thread$VirtualThreadScheduler}. User-customizable I/O methods delegate via MH;
  *       scheduling methods ({@code onStart}, {@code onContinue}) also delegate via MH.
  *       Fallback methods (masterPoller, readPollers, …) use direct invokevirtual.</li>
-   *   <li>{@code transformVirtualThread} &mdash; rewrites {@code java.lang.VirtualThread}:
-   *       replaces {@code loadCustomScheduler} body to return {@code Poller.POLLER_GROUP}.</li>
+ *   <li>{@code transformVirtualThread} &mdash; rewrites {@code java.lang.VirtualThread}:
+ *       replaces {@code loadCustomScheduler} body to return {@code Poller.pollerGroupForScheduler()}.</li>
  * </ol>
  */
 final class AgentBytecodeToolkit {
@@ -49,7 +49,7 @@ final class AgentBytecodeToolkit {
      * <ul>
      *   <li>Renames {@code createPollerGroup()} to {@code createPollerGroup0()}</li>
      *   <li>Adds {@code public static final Object jdkPoller} field</li>
-     *   <li>Changes {@code POLLER_GROUP} from private to public</li>
+     *   <li>Adds {@code public static Object pollerGroupForScheduler()} method to access {@code POLLER_GROUP}</li>
      *   <li>Generates a new {@code createPollerGroup()} that:
      *       (1) calls {@code createPollerGroup0()} → jdkGroup,
      *       (2) creates {@code new JdkProxyVirtualThreadRuntime(jdkGroup)} → proxy,
@@ -81,24 +81,23 @@ final class AgentBytecodeToolkit {
                     }
                 }
 
-                // Make POLLER_GROUP field public (was private)
-                if (element instanceof FieldModel fieldModel) {
-                    String fieldName = fieldModel.fieldName().stringValue();
-                    if ("POLLER_GROUP".equals(fieldName)) {
-                        int newFlags = (fieldModel.flags().flagsMask() & ~AccessFlag.PRIVATE.mask())
-                                | AccessFlag.PUBLIC.mask();
-                        classBuilder.withField(fieldName, fieldModel.fieldTypeSymbol(),
-                                fb -> fb.withFlags(newFlags));
-                        continue;
-                    }
-                }
-
                 classBuilder.with(element);
             }
 
             // --- Add new field: public static Object jdkPoller ---
             classBuilder.withField("jdkPoller", ConstantDescs.CD_Object,
                     fb -> fb.withFlags(AccessFlag.PUBLIC, AccessFlag.STATIC));
+
+            // --- Add new method: public static Object pollerGroupForScheduler() ---
+            // Used by rewritten VirtualThread.loadCustomScheduler() so we don't need
+            // to widen POLLER_GROUP's access flags.
+            classBuilder.withMethodBody("pollerGroupForScheduler",
+                    MethodTypeDesc.of(ConstantDescs.CD_Object),
+                    AccessFlag.PUBLIC.mask() | AccessFlag.STATIC.mask(),
+                    code -> {
+                        code.getstatic(pollerDesc, "POLLER_GROUP", pollerGroupDesc);
+                        code.areturn();
+                    });
 
             // --- Generate new createPollerGroup() ---
             MethodTypeDesc createPollerGroupDesc = MethodTypeDesc.ofDescriptor("()Lsun/nio/ch/Poller$PollerGroup;");
@@ -744,7 +743,7 @@ final class AgentBytecodeToolkit {
 
     /**
      * Transforms {@code java.lang.VirtualThread}: replaces {@code loadCustomScheduler}
-     * method body with {@code return (VirtualThreadScheduler) Poller.POLLER_GROUP;}.
+     * method body with {@code return (VirtualThreadScheduler) Poller.pollerGroupForScheduler();}.
      * No schema changes (no field additions/removals) — safe for retransformClasses.
      */
     public static byte[] transformVirtualThread(byte[] virtualThreadBytecode) {
@@ -754,6 +753,7 @@ final class AgentBytecodeToolkit {
         ClassDesc pollerDesc = ClassDesc.of("sun.nio.ch.Poller");
         ClassDesc pollerGroupDesc = ClassDesc.of("sun.nio.ch.Poller$PollerGroup");
         ClassDesc virtualThreadSchedulerDesc = ClassDesc.ofDescriptor("Ljava/lang/Thread$VirtualThreadScheduler;");
+        MethodTypeDesc pollerGroupForSchedulerDesc = MethodTypeDesc.of(ConstantDescs.CD_Object);
 
         return classFile.build(vtDesc, classBuilder -> {
             for (ClassElement element : vtModel) {
@@ -762,14 +762,14 @@ final class AgentBytecodeToolkit {
                     String methodName = methodModel.methodName().stringValue();
                     if ("loadCustomScheduler".equals(methodName)) {
                         // Replace method body:
-                        //   return (VirtualThreadScheduler) Poller.POLLER_GROUP;
+                        //   return (VirtualThreadScheduler) Poller.pollerGroupForScheduler();
                         classBuilder.withMethod(
                                 methodName,
                                 methodModel.methodTypeSymbol(),
                                 methodModel.flags().flagsMask(),
                                 mb -> mb.withCode(code -> {
-                                    // getstatic sun/nio/ch/Poller.POLLER_GROUP : Lsun/nio/ch/Poller$PollerGroup;
-                                    code.getstatic(pollerDesc, "POLLER_GROUP", pollerGroupDesc);
+                                    // invokestatic sun/nio/ch/Poller.pollerGroupForScheduler : ()Ljava/lang/Object;
+                                    code.invokestatic(pollerDesc, "pollerGroupForScheduler", pollerGroupForSchedulerDesc);
                                     // checkcast java/lang/Thread$VirtualThreadScheduler
                                     code.checkcast(virtualThreadSchedulerDesc);
                                     // areturn

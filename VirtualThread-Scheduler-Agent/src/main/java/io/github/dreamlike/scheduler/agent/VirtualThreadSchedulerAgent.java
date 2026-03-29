@@ -159,7 +159,7 @@ public final class VirtualThreadSchedulerAgent {
                 dumpIfNeeded("java.lang.VirtualThread_transformed", transformed);
                 return transformed;
             }
-            return classfileBuffer;
+            return null;
         }
     }
 }

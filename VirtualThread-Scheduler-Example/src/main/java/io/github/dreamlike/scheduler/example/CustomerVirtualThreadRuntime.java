@@ -326,7 +326,7 @@ public class CustomerVirtualThreadRuntime extends AbstractVirtualThreadRuntime {
                 return awareShutdownExecutor;
             }
             boolean isSupport = executor instanceof ScheduledExecutorService;
-            if (isSupport) {
+            if (!isSupport) {
                 return (runnable, _) -> {
                     try {
                         executor.execute(runnable);

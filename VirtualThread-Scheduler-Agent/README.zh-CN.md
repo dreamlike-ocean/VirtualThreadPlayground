@@ -31,11 +31,11 @@ VirtualThreadPoller（纯 I/O）              Thread.VirtualThreadScheduler（JD
 **1. `sun.nio.ch.Poller`**（通过 ClassFileTransformer 在首次加载时拦截）：
 - 将 `createPollerGroup()` 重命名为 `createPollerGroup0()`
 - 新增 `public static Object jdkPoller` 字段
-- 将 `POLLER_GROUP` 字段从 `private` 改为 `public`
+- 新增 `public static Object pollerGroupForScheduler()` 方法，用于访问 `POLLER_GROUP`
 - 生成新的 `createPollerGroup()`，用 `JdkProxyVirtualThreadRuntime` 包装结果
 
 **2. `java.lang.VirtualThread`**（通过 `retransformClasses` —— premain 时已被 JVM 加载）：
-- 替换 `loadCustomScheduler()` 方法体为 `return (VirtualThreadScheduler) Poller.POLLER_GROUP`
+- 替换 `loadCustomScheduler()` 方法体为 `return (VirtualThreadScheduler) Poller.pollerGroupForScheduler()`
 - Agent 设置 `System.setProperty("jdk.virtualThreadScheduler.implClass", "agent-forced")` 强制原始 `<clinit>` 走自定义调度器分支
 
 ### 初始化顺序
@@ -54,7 +54,7 @@ premain → install():
   ① createBuiltinScheduler(true) → ForkJoinPool
   ② createExternalView(builtin) → externalView
   ③ loadCustomScheduler(...) [被改写]:
-     → getstatic Poller.POLLER_GROUP → 触发 Poller.<clinit>:
+     → invokestatic Poller.pollerGroupForScheduler() → 触发 Poller.<clinit>:
        → createPollerGroup() [被改写]:
          → createPollerGroup0() → jdkGroup（已 start）
          → proxy = new JdkProxyVirtualThreadRuntime(jdkGroup)

@@ -31,11 +31,11 @@ VirtualThreadPoller (pure I/O)            Thread.VirtualThreadScheduler (JDK, pu
 **1. `sun.nio.ch.Poller`** (via ClassFileTransformer on first load):
 - Renames `createPollerGroup()` → `createPollerGroup0()`
 - Adds `public static Object jdkPoller` field
-- Changes `POLLER_GROUP` field from `private` to `public`
+- Adds `public static Object pollerGroupForScheduler()` accessor method for `POLLER_GROUP`
 - Generates new `createPollerGroup()` that wraps the result with `JdkProxyVirtualThreadRuntime`
 
 **2. `java.lang.VirtualThread`** (via `retransformClasses` — already loaded at premain time):
-- Replaces `loadCustomScheduler()` body to return `(VirtualThreadScheduler) Poller.POLLER_GROUP`
+- Replaces `loadCustomScheduler()` body to return `(VirtualThreadScheduler) Poller.pollerGroupForScheduler()`
 - Agent sets `System.setProperty("jdk.virtualThreadScheduler.implClass", "agent-forced")` to force the original `<clinit>` to take the custom scheduler branch
 
 ### Initialization Order
@@ -54,7 +54,7 @@ First use of virtual threads → VirtualThread.<clinit>:
   ① createBuiltinScheduler(true) → ForkJoinPool
   ② createExternalView(builtin) → externalView
   ③ loadCustomScheduler(...) [REWRITTEN]:
-     → getstatic Poller.POLLER_GROUP → triggers Poller.<clinit>:
+     → invokestatic Poller.pollerGroupForScheduler() → triggers Poller.<clinit>:
        → createPollerGroup() [REWRITTEN]:
          → createPollerGroup0() → jdkGroup (started)
          → proxy = new JdkProxyVirtualThreadRuntime(jdkGroup)
