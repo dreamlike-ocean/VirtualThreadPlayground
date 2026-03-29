@@ -1,129 +1,173 @@
 # VirtualThread-Scheduler-Agent (English)
 
 ## Overview
-This module provides a Java Agent that rewrites the JDK-internal class `sun.nio.ch.DefaultPollerProvider` inside `java.base` at runtime:
 
-- Moves the original `readPoller/writePoller` implementations to `readPoller0/writePoller0`.
-- The new `readPoller/writePoller` creates and returns an injected `java.base` class `sun.nio.ch.JdkPollerProxy`.
-- `JdkPollerProxy` delegates operations to a user-defined `VirtualThreadPoller` implementation (for example `CustomerVirtualThreadPoller`) via `MethodHandle.invokeExact`.
+This module provides a Java Agent that rewrites both `sun.nio.ch.Poller` and `java.lang.VirtualThread` at runtime, creating a **unified virtual thread runtime** — a single proxy object that simultaneously serves as the I/O PollerGroup and the VirtualThread Scheduler (`POLLER_GROUP == DEFAULT_SCHEDULER`).
 
-## Pseudocode (patch point)
-Note: "Patched by agent" means the JDK internal class being rewritten: `java.base/sun.nio.ch.DefaultPollerProvider`.
+Think of it as a Tokio-style runtime for Java virtual threads: one global singleton handles both task scheduling and async I/O event dispatching.
+
+## Interface Hierarchy
+
+```
+VirtualThreadPoller (pure I/O)            Thread.VirtualThreadScheduler (JDK, pure scheduling)
+  poll(fdVal, event, nanos, isOpen)         onStart(VirtualThreadTask)
+  pollSelector(fdVal, nanos)                onContinue(VirtualThreadTask)
+  start()
+          \                               /
+           \                             /
+            VirtualThreadRuntime (union of both)
+              extends VirtualThreadPoller, Thread.VirtualThreadScheduler
+              (no additional methods)
+```
+
+- `VirtualThreadPoller` and `VirtualThreadScheduler` are **parallel, independent interfaces**
+- `VirtualThreadRuntime` is their **union** — the user-facing API
+- The JDK adaptor only implements `VirtualThreadPoller` (no scheduling stubs needed)
+
+## How It Works
+
+### Agent Patches Two JDK Classes
+
+**1. `sun.nio.ch.Poller`** (via ClassFileTransformer on first load):
+- Renames `createPollerGroup()` → `createPollerGroup0()`
+- Adds `public static Object jdkPoller` field
+- Changes `POLLER_GROUP` field from `private` to `public`
+- Generates new `createPollerGroup()` that wraps the result with `JdkProxyVirtualThreadRuntime`
+
+**2. `java.lang.VirtualThread`** (via `retransformClasses` — already loaded at premain time):
+- Replaces `loadCustomScheduler()` body to return `(VirtualThreadScheduler) Poller.POLLER_GROUP`
+- Agent sets `System.setProperty("jdk.virtualThreadScheduler.implClass", "agent-forced")` to force the original `<clinit>` to take the custom scheduler branch
+
+### Initialization Order
+
+```
+premain → install():
+  ① redefineModule: open sun.nio.ch + java.lang to agent
+  ② addTransformer (intercepts Poller + VirtualThread)
+  ③ retransformClasses(VirtualThread) — rewrite loadCustomScheduler
+  ④ defineClass(JdkVirtualThreadPollerAdaptor) in App CL
+  ⑤ Class.forName("sun.nio.ch.Poller", false, null) — LOAD only, transformer rewrites
+  ⑥ privateLookupIn(Poller) → defineClass(JdkProxyVirtualThreadRuntime)
+  install() ends. Neither Poller nor VirtualThread have been INITIALIZED.
+
+First use of virtual threads → VirtualThread.<clinit>:
+  ① createBuiltinScheduler(true) → ForkJoinPool
+  ② createExternalView(builtin) → externalView
+  ③ loadCustomScheduler(...) [REWRITTEN]:
+     → getstatic Poller.POLLER_GROUP → triggers Poller.<clinit>:
+       → createPollerGroup() [REWRITTEN]:
+         → createPollerGroup0() → jdkGroup (started)
+         → proxy = new JdkProxyVirtualThreadRuntime(jdkGroup)
+           → adaptor = MH(jdkGroup), stored to proxy.adaptor field
+           → Poller.jdkPoller = proxy.adaptor
+           → customerPoller = MH() — no-arg constructor
+         → return proxy
+       → POLLER_GROUP = proxy
+     → return proxy as VirtualThreadScheduler
+  ④ DEFAULT_SCHEDULER = proxy  ← same object as POLLER_GROUP ✅
+  ⑤ EXTERNAL_VIEW = externalView
+```
+
+### Runtime Access (lazy, read-only)
+
+`AbstractVirtualThreadRuntime` provides two final accessor methods:
+
+- `jdkVirtualThreadPoller()` → reads `Poller.jdkPoller` via `VarHandle` → returns `VirtualThreadPoller` (adaptor)
+- `jdkScheduler()` → calls `VirtualThread.builtinScheduler(false)` via `MethodHandle` → returns JDK builtin scheduler's external view
+
+Both handles are resolved in `static {}` using `LoomSecretHelper.LOOKUP` (trusted lookup, needed because `VirtualThread` is a package-private class).
+
+## JdkProxyVirtualThreadRuntime (injected into java.base)
 
 ```java
-// === Patched by agent: java.base/sun.nio.ch.DefaultPollerProvider ===
+class JdkProxyVirtualThreadRuntime
+        extends Poller$PollerGroup
+        implements Thread$VirtualThreadScheduler {
 
-// Original logic moved to readPoller0/writePoller0 (method bodies are from JDK)
-Poller readPoller0(boolean subPoller) throws IOException { /* original JDK code */ }
-Poller writePoller0(boolean subPoller) throws IOException { /* original JDK code */ }
+    static final MethodHandle _mhAdaptorCtor;   // (Object) → Object
+    static final MethodHandle _mhCtor;          // () → Object  [no-arg]
+    static final MethodHandle _mhPoll, _mhPollSelector, _mhStart;
+    static final MethodHandle _mhOnStart, _mhOnContinue;
 
-// New readPoller/writePoller: call *0 to get the JDK Poller, then wrap it
-Poller readPoller(boolean subPoller) throws IOException {
-  Poller jdk = readPoller0(subPoller);
-  return new sun.nio.ch.JdkPollerProxy(jdk, /*mode*/ 1, subPoller);
+    final PollerGroup jdk;
+    final Object adaptor;          // JdkVirtualThreadPollerAdaptor instance
+    final Object customerPoller;   // user VirtualThreadRuntime instance
+
+    JdkProxyVirtualThreadRuntime(PollerGroup jdkGroup) {
+        super(jdkGroup.provider());
+        this.jdk = jdkGroup;
+        this.adaptor = _mhAdaptorCtor.invokeExact((Object) jdkGroup);
+        this.customerPoller = _mhCtor.invokeExact();  // no-arg
+    }
+
+    // User methods (MH → customerPoller)
+    void poll(...)         { _mhPoll.invokeExact(customerPoller, ...); }
+    void pollSelector(...) { _mhPollSelector.invokeExact(customerPoller, ...); }
+    void start()           { _mhStart.invokeExact(customerPoller); }
+    void onStart(task)     { _mhOnStart.invokeExact(customerPoller, task); }
+    void onContinue(task)  { _mhOnContinue.invokeExact(customerPoller, task); }
+
+    // Fallback (direct invokevirtual on jdk field)
+    Poller masterPoller()       { return jdk.masterPoller(); }
+    List<Poller> readPollers()  { return jdk.readPollers(); }
+    List<Poller> writePollers() { return jdk.writePollers(); }
+    boolean useLazyUnpark()     { return jdk.useLazyUnpark(); }
 }
-
-Poller writePoller(boolean subPoller) throws IOException {
-  Poller jdk = writePoller0(subPoller);
-  return new sun.nio.ch.JdkPollerProxy(jdk, /*mode*/ 2, subPoller);
-}
-```
-
-## JdkPollerProxy pseudocode (injected into java.base)
-Note: `sun.nio.ch.JdkPollerProxy` is injected by the agent into `java.base`. It resolves all `MethodHandle`s once in `<clinit>` and uses `invokeExact` on the hot path.
-
-```java
-// === Injected by agent: java.base/sun.nio.ch.JdkPollerProxy ===
-class sun.nio.ch.JdkPollerProxy extends sun.nio.ch.Poller {
-  // User instantiation entry: prefer static factory acquire(...), fallback to public ctor(...)
-  static final MethodHandle mhCreatorOrCtor;
-
-  // Adaptor ctor to wrap the JDK Poller into a VirtualThreadPoller view
-  static final MethodHandle mhAdaptorCtor;
-
-  // User poller method handles (resolved once in <clinit>)
-  static final MethodHandle mhImplRead;
-  static final MethodHandle mhImplWrite;
-  static final MethodHandle mhImplStartPoll;
-  static final MethodHandle mhImplStopPoll;
-  static final MethodHandle mhPollTimeout;
-  static final MethodHandle mhClose;
-
-  // Holds the user poller instance (could be a singleton / cached instance)
-  final Object userPoller;
-
-  static {
-    Class<?> userCls = Class.forName(implClass, true, cl);
-
-    // Prefer: public static <T> acquire(VirtualThreadPoller, int, boolean)
-    // Fallback: public <T>(VirtualThreadPoller, int, boolean)
-    mhCreatorOrCtor = resolveAcquireOrCtor(userCls);
-
-    // resolve user method handles: implRead/implWrite/...
-    mhImplRead = resolve(userCls, "implRead", ...);
-    ...
-  }
-
-  JdkPollerProxy(Poller jdkPoller, int mode, boolean subPoller) {
-    VirtualThreadPoller adaptor = (VirtualThreadPoller) mhAdaptorCtor.invokeExact((Object) jdkPoller);
-    this.userPoller = mhCreatorOrCtor.invokeExact((Object) adaptor, mode, subPoller);
-  }
-
-  // delegate to user poller
-  int implRead(...)  { return (int) mhImplRead.invokeExact(userPoller, ...); }
-  int implWrite(...) { return (int) mhImplWrite.invokeExact(userPoller, ...); }
-  void implStartPoll(int fd) { mhImplStartPoll.invokeExact(userPoller, fd); }
-  void implStopPoll(int fd, boolean polled) { mhImplStopPoll.invokeExact(userPoller, fd, polled); }
-  int poll(int timeout) { return (int) mhPollTimeout.invokeExact(userPoller, timeout); }
-  void close() { mhClose.invokeExact(userPoller); }
-}
-```
-
-## ASCII call chain (with class loaders)
-
-```
-[Bootstrap CL | java.base]
-sun.nio.ch.DefaultPollerProvider.readPoller/writePoller   (patched)
-  -> new sun.nio.ch.JdkPollerProxy(jdkPoller, mode, subPoller)
-
-[Bootstrap CL | java.base]
-sun.nio.ch.JdkPollerProxy  (injected)
-  -> (MH invokeExact) user poller: CustomerVirtualThreadPoller
-
-[AppClassLoader/Agent CL | your app]
-io.github.dreamlike.scheduler.example.CustomerVirtualThreadPoller
-  -> uses jdkVirtualThreadPoller (adaptor) to fallback to the JDK poller
-
-[AppClassLoader/Agent CL | your app]
-io.github.dreamlike.scheduler.agent.JdkVirtualThreadPollerAdaptor (injected/defined)
-  -> (MH invokeExact) sun.nio.ch.Poller methods
-
-[Bootstrap CL | java.base]
-sun.nio.ch.KQueuePoller / EpollPoller / ... (real JDK poller)
 ```
 
 ## Configuration (agentArgs)
+
 Arguments are passed via `-javaagent:...=k=v,k2=v2`.
 
-- `jdk.virtualThreadScheduler.poller.implClass`
-  - Fully-qualified class name of the user poller implementation.
-  - Example: `io.github.dreamlike.scheduler.example.CustomerVirtualThreadPoller`
+| Parameter | Default | Description |
+|---|---|---|
+| `jdk.virtualThreadScheduler.poller.implClass` | (required) | Fully-qualified class name of the user `VirtualThreadRuntime` implementation. Must have a public no-arg constructor. |
+| `jdk.virtualThreadScheduler.poller.dumpBytecode` | `false` | When `true`, dumps all generated/transformed bytecodes to the current working directory. |
 
-- `jdk.virtualThreadScheduler.poller.supportReadOps` (default `true`)
-  - Controls the rewritten `DefaultPollerProvider.supportReadOps()` return value.
-
-- `jdk.virtualThreadScheduler.poller.supportWriteOps` (default `true`)
-  - Controls the rewritten `DefaultPollerProvider.supportWriteOps()` return value.
-
-## User poller instantiation (constructor)
-`sun.nio.ch.JdkPollerProxy` resolves the user poller creation strategy once in `<clinit>`:
-
-It uses a public constructor (must be a single-ctor):
-
-```java
-public <T>(VirtualThreadPoller jdk, int mode, boolean subPoller)
+Example:
+```bash
+java -javaagent:agent.jar=jdk.virtualThreadScheduler.poller.implClass=com.example.MyRuntime,jdk.virtualThreadScheduler.poller.dumpBytecode=true \
+     -jar app.jar
 ```
 
-Notes:
-- This resolution happens in an injected `java.base` class, so it uses `MethodHandle` calls.
-- MethodHandles are resolved once in `<clinit>` and then called via `invokeExact`, without `bindTo`.
+## User Runtime Implementation
+
+```java
+public class MyRuntime extends AbstractVirtualThreadRuntime {
+
+    public MyRuntime() { super(); }  // no-arg constructor required
+
+    @Override
+    public void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException {
+        // custom I/O logic, or fallback:
+        jdkVirtualThreadPoller().poll(fdVal, event, nanos, isOpen);
+    }
+
+    @Override
+    public void pollSelector(int fdVal, long nanos) throws IOException {
+        jdkVirtualThreadPoller().pollSelector(fdVal, nanos);
+    }
+
+    @Override
+    public void onStart(Thread.VirtualThreadTask task) {
+        // custom scheduling logic, or fallback:
+        jdkScheduler().onStart(task);
+    }
+
+    @Override
+    public void onContinue(Thread.VirtualThreadTask task) {
+        jdkScheduler().onContinue(task);
+    }
+}
+```
+
+## Dump Files
+
+When `dumpBytecode=true`, the following files are written to the current directory:
+
+| File | Content |
+|---|---|
+| `java_lang_VirtualThread_transformed.class` | Transformed VirtualThread (loadCustomScheduler rewritten) |
+| `sun_nio_ch_Poller_transformed.class` | Transformed Poller (createPollerGroup rewritten, jdkPoller/POLLER_GROUP fields added/modified) |
+| `sun_nio_ch_JdkProxyVirtualThreadRuntime.class` | Proxy: extends PollerGroup + implements VirtualThreadScheduler |
+| `io_github_dreamlike_scheduler_agent_JdkVirtualThreadPollerAdaptor.class` | Adaptor: wraps PollerGroup as VirtualThreadPoller |
