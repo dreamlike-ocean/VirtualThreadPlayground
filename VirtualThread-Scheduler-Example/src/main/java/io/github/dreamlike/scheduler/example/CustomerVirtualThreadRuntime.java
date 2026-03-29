@@ -1,11 +1,17 @@
-package io.github.dreamlike;
+package io.github.dreamlike.scheduler.example;
 
+import io.github.dreamlike.AbstractVirtualThreadRuntime;
+import io.github.dreamlike.LoomSecretHelper;
+
+import java.io.IOException;
 import java.lang.invoke.VarHandle;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 
 // 默认继承线程
@@ -13,32 +19,55 @@ import java.util.concurrent.atomic.AtomicReference;
 // 2. platform(with propagateExecutor)/Thread.startVirtualThread -> Thread.startVirtualThread => executor ✅
 // 3. vt(with executor) -> Thread.startVirtualThread => executor ✅
 // 4. vt(with executor) -> Thread.startVirtualThread -> Thread.startVirtualThread => executor ✅
-// 如果是来自于CustomerVirtualThreadScheduler的那么其DISPATCHER_EXECUTOR_SCOPED_VALUE肯定是有值的
-public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadScheduler {
+// 如果是来自于CustomerVirtualThreadRuntime的那么其DISPATCHER_EXECUTOR_SCOPED_VALUE肯定是有值的
+public class CustomerVirtualThreadRuntime extends AbstractVirtualThreadRuntime {
 
     private static final boolean POLLER_PER_CARRIER_THREAD = Integer.parseInt(System.getProperty("jdk.pollerMode", "0")) == 3;
     private static final boolean CHECK_CARRIER_THREAD = Boolean.parseBoolean(System.getProperty("check.carrierThread", "true"));
     private static final DispatcherContext DUMMY = new EmptyContext(null);
     private static final ScopedValue<DispatcherContext> DISPATCHER_EXECUTOR_SCOPED_VALUE = ScopedValue.newInstance();
-    public static CustomerVirtualThreadScheduler INSTANCE;
-    private static Thread.VirtualThreadScheduler jdkBuildInScheduler;
+    public static CustomerVirtualThreadRuntime INSTANCE;
 
-    static {
-        Thread.ofVirtual()
-                .unstarted(() -> {});
-    }
+    /**
+     * Counts poll() invocations — for testing.
+     */
+    private final AtomicInteger pollCount = new AtomicInteger();
 
-    public CustomerVirtualThreadScheduler(Thread.VirtualThreadScheduler defaultScheduler) {
-        jdkBuildInScheduler = defaultScheduler;
+    public CustomerVirtualThreadRuntime() {
         INSTANCE = this;
         VarHandle.storeStoreFence();
     }
+
+    // ==================== Polling overrides ====================
+
+    @Override
+    public void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException {
+        pollCount.incrementAndGet();
+        System.out.println("[CustomerRuntime] poll fdVal=" + fdVal + " event=" + event);
+        jdkVirtualThreadPoller().poll(fdVal, event, nanos, isOpen);
+    }
+
+    @Override
+    public void pollSelector(int fdVal, long nanos) throws IOException {
+        System.out.println("[CustomerRuntime] pollSelector fdVal=" + fdVal);
+        jdkVirtualThreadPoller().pollSelector(fdVal, nanos);
+    }
+
+    public int getPollCount() {
+        return pollCount.get();
+    }
+
+    public void resetPollCount() {
+        pollCount.set(0);
+    }
+
+    // ==================== Scheduling overrides ====================
 
     @Override
     public void onStart(Thread.VirtualThreadTask task) {
         if (task.attachment() instanceof DispatcherContext dispatcherContext) {
             if (!dispatcherContext.executor().execute(task, task.preferredCarrier())) {
-                jdkBuildInScheduler.onStart(task);
+                jdkScheduler().onStart(task);
             }
             return;
         }
@@ -64,7 +93,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         // 1.找不到任何父级执行器，那么就使用jdk的调度器
         // 2.或者父级的调度器无法投递 那么就使用jdk的调度器
         task.attach(null);
-        jdkBuildInScheduler.onStart(task);
+        jdkScheduler().onStart(task);
     }
 
     @Override
@@ -79,12 +108,23 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         if (task.attachment() instanceof DispatcherContext dispatcherContext && dispatcherContext.executor().execute(task, task.preferredCarrier())) {
             return;
         }
-        jdkBuildInScheduler.onContinue(task);
+        jdkScheduler().onContinue(task);
+    }
+
+    @Override
+    public Future<?> schedule(Runnable task, long delay, TimeUnit unit) {
+        DispatcherContext currentContext = getCurrentContext();
+        if (currentContext == null || !currentContext.executor().supportSchedule()) {
+            return jdkScheduler().schedule(task, delay, unit);
+        }
+        return currentContext.executor().schedule(task, delay, unit);
     }
 
     private boolean isPollerPerCarrierThread(Thread pollerThread) {
         return POLLER_PER_CARRIER_THREAD && pollerThread.getName().endsWith("Read-Poller");
     }
+
+    // ==================== Static utility methods ====================
 
     public static Thread newThread(AwareShutdownExecutor executor, Runnable runnable) {
         Thread.VirtualThreadTask virtualThreadTask = INSTANCE.newThread(Thread.ofVirtual(), null, runnable);
@@ -156,6 +196,8 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         return null;
     }
 
+    // ==================== DispatcherContext hierarchy ====================
+
     private sealed static abstract class DispatcherContext permits DynamicDispatcherContext, EmptyContext, PinningContext, PollerContext {
         protected final DispatcherContext parent;
         protected final Thread currentThread;
@@ -181,7 +223,7 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         }
 
         private Runnable initialTask(Thread.VirtualThreadTask virtualThreadTask) {
-           return virtualThreadTask;
+            return virtualThreadTask;
         }
 
         private Runnable assertThreadTask(Thread.VirtualThreadTask virtualThreadTask) {
@@ -266,21 +308,58 @@ public class CustomerVirtualThreadScheduler implements Thread.VirtualThreadSched
         }
     }
 
+    // ==================== AwareShutdownExecutor ====================
+
     public interface AwareShutdownExecutor {
         boolean execute(Runnable runnable, Thread perferredThread);
+
+        default boolean supportSchedule() {
+            return false;
+        }
+
+        default Future<?> schedule(Runnable task, long delay, TimeUnit unit) {
+            throw new UnsupportedOperationException("not support schedule");
+        }
 
         static AwareShutdownExecutor adapt(Executor executor) {
             if (executor instanceof AwareShutdownExecutor awareShutdownExecutor) {
                 return awareShutdownExecutor;
             }
-            return (runnable, _) -> {
-                try {
-                    executor.execute(runnable);
-                    return true;
-                } catch (RejectedExecutionException executionException) {
-                    return false;
-                }
-            };
+            boolean isSupport = executor instanceof ScheduledExecutorService;
+            if (isSupport) {
+                return (runnable, _) -> {
+                    try {
+                        executor.execute(runnable);
+                        return true;
+                    } catch (RejectedExecutionException executionException) {
+                        return false;
+                    }
+                };
+            } else {
+                return new AwareShutdownExecutor() {
+                    private final ScheduledExecutorService scheduledExecutorService = (ScheduledExecutorService) executor;
+
+                    @Override
+                    public boolean execute(Runnable runnable, Thread perferredThread) {
+                        try {
+                            executor.execute(runnable);
+                            return true;
+                        } catch (RejectedExecutionException executionException) {
+                            return false;
+                        }
+                    }
+
+                    @Override
+                    public boolean supportSchedule() {
+                        return true;
+                    }
+
+                    @Override
+                    public Future<?> schedule(Runnable task, long delay, TimeUnit unit) {
+                        return scheduledExecutorService.schedule(task, delay, unit);
+                    }
+                };
+            }
         }
     }
 }
