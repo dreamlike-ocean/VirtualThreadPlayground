@@ -21,7 +21,4 @@ echo "  App:   $APP_JAR"
 echo "  Debug: localhost:5005 (suspend=y)"
 echo ""
 
-exec java \
-  -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005 \
-  -javaagent:"$AGENT_JAR=$AGENT_ARGS" \
-  -jar "$APP_JAR"
+java -Djdk.pollerMode=1 -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005 -javaagent:"$AGENT_JAR=$AGENT_ARGS" -jar "$APP_JAR"
