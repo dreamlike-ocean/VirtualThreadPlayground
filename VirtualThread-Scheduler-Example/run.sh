@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 POLLER_MODE="1"
+DEBUG_MODE="false"
 if [[ $# -gt 0 ]]; then
   case "$1" in
     1|2|3)
@@ -12,8 +13,17 @@ if [[ $# -gt 0 ]]; then
       shift
       ;;
     *)
-      echo "Usage: $0 [pollerMode: 1|2|3] [appArgs...]"
+      echo "Usage: $0 [pollerMode: 1|2|3] [debug: true|false] [appArgs...]"
       exit 2
+      ;;
+  esac
+fi
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    true|false)
+      DEBUG_MODE="$1"
+      shift
       ;;
   esac
 fi
@@ -38,7 +48,16 @@ case "$POLLER_MODE" in
   3) POLLER_MODE_LABEL="CarrierThreadPoller" ;;
 esac
 echo "  PollerMode: $POLLER_MODE_LABEL"
-echo "  Debug: localhost:5005 (suspend=y)"
+if [[ "$DEBUG_MODE" == "true" ]]; then
+  echo "  Debug: localhost:5005 (suspend=n)"
+else
+  echo "  Debug: false"
+fi
 echo ""
 
-java -Djdk.pollerMode="$POLLER_MODE" -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005 -javaagent:"$AGENT_JAR=$AGENT_ARGS" -jar "$APP_JAR" "$@"
+JAVA_DEBUG_ARGS=()
+if [[ "$DEBUG_MODE" == "true" ]]; then
+  JAVA_DEBUG_ARGS+=("-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005")
+fi
+
+java -Djdk.pollerMode="$POLLER_MODE" "${JAVA_DEBUG_ARGS[@]}" -javaagent:"$AGENT_JAR=$AGENT_ARGS" -jar "$APP_JAR" "$@"

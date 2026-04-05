@@ -3,6 +3,7 @@ package io.github.dreamlike;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
+import java.util.concurrent.ForkJoinPool;
 
 /**
  * Abstract base class for custom virtual thread runtime implementations.
@@ -76,7 +77,9 @@ public abstract class AbstractVirtualThreadRuntime implements VirtualThreadRunti
 
     @Override
     public final void start() {
-        jdkVirtualThreadPoller().start();
+        // 为避免 VirtualThread/Poller 在 <clinit> 期间互相触发导致循环初始化/Already started，把 jdk poller 的 start 异步延后执行，等待类初始化锁释放后再启动。
+        // Avoids VirtualThread↔Poller circular initialization during <clinit> (can cause re-entrance/Already started) by deferring JDK poller start asynchronously until class init completes.
+        new Thread(() -> jdkVirtualThreadPoller().start()).start();
         start0();
     }
 
