@@ -2,6 +2,8 @@ package io.github.dreamlike.scheduler.agent;
 
 import java.lang.classfile.*;
 import java.lang.classfile.attribute.ExceptionsAttribute;
+import java.lang.classfile.instruction.InvokeInstruction;
+import java.lang.classfile.instruction.LoadInstruction;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.ConstantDescs;
 import java.lang.constant.MethodTypeDesc;
@@ -75,7 +77,8 @@ final class AgentBytecodeToolkit {
                                 "createPollerGroup0",
                                 methodModel.methodTypeSymbol(),
                                 methodModel.flags().flagsMask(),
-                                mb -> mb.transform(methodModel, MethodTransform.ACCEPT_ALL)
+                                mb -> mb.transform(methodModel,
+                                        MethodTransform.transformingCode(dropPollerGroupStart(pollerGroupDesc)))
                         );
                         continue; // skip adding the original
                     }
@@ -122,6 +125,11 @@ final class AgentBytecodeToolkit {
                             cb.aload(1);
                             cb.getfield(proxyDesc, "adaptor", ConstantDescs.CD_Object);
                             cb.putstatic(pollerDesc, "jdkPoller", ConstantDescs.CD_Object);
+
+                            // start via proxy so user's VirtualThreadPoller#start is reachable
+                            cb.aload(1);
+                            cb.invokevirtual(pollerGroupDesc, "start",
+                                    MethodTypeDesc.of(ConstantDescs.CD_void));
 
                             // return proxy;
                             cb.aload(1);
@@ -821,5 +829,59 @@ final class AgentBytecodeToolkit {
         }
         cb.invokestatic(methodTypeDesc, "methodType",
                 MethodTypeDesc.ofDescriptor("(Ljava/lang/Class;[Ljava/lang/Class;)Ljava/lang/invoke/MethodType;"));
+    }
+
+    private static CodeTransform dropPollerGroupStart(ClassDesc pollerGroupDesc) {
+        MethodTypeDesc startDesc = MethodTypeDesc.of(ConstantDescs.CD_void);
+        return CodeTransform.ofStateful(() -> new CodeTransform() {
+            CodeElement pendingLoad = null;
+
+            @Override
+            public void accept(CodeBuilder builder, CodeElement element) {
+                // Drop "aload X; invokevirtual PollerGroup.start()V" to avoid starting the pollers
+                // inside Poller.<clinit> (and to allow start to be routed through our proxy).
+                if (pendingLoad != null) {
+                    if (isPollerGroupStartInvoke(element, pollerGroupDesc, startDesc)) {
+                        pendingLoad = null;
+                        return;
+                    }
+                    builder.with(pendingLoad);
+                    pendingLoad = null;
+                }
+
+                if (element instanceof LoadInstruction li && li.typeKind() == TypeKind.REFERENCE) {
+                    pendingLoad = element;
+                    return;
+                }
+
+                builder.with(element);
+            }
+
+            @Override
+            public void atEnd(CodeBuilder builder) {
+                if (pendingLoad != null) {
+                    builder.with(pendingLoad);
+                    pendingLoad = null;
+                }
+            }
+        });
+    }
+
+    private static boolean isPollerGroupStartInvoke(CodeElement element,
+                                                    ClassDesc pollerGroupDesc,
+                                                    MethodTypeDesc startDesc) {
+        if (!(element instanceof InvokeInstruction inv)) {
+            return false;
+        }
+        if (inv.opcode() != Opcode.INVOKEVIRTUAL && inv.opcode() != Opcode.INVOKEINTERFACE) {
+            return false;
+        }
+        if (!"start".equals(inv.name().stringValue())) {
+            return false;
+        }
+        if (!startDesc.equals(inv.typeSymbol())) {
+            return false;
+        }
+        return pollerGroupDesc.equals(inv.owner().asSymbol());
     }
 }

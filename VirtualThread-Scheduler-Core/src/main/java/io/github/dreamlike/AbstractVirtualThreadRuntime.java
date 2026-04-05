@@ -75,8 +75,13 @@ public abstract class AbstractVirtualThreadRuntime implements VirtualThreadRunti
     }
 
     @Override
-    public void start() {
+    public final void start() {
         jdkVirtualThreadPoller().start();
+        start0();
+    }
+
+    protected void start0() {
+
     }
 
     @Override
