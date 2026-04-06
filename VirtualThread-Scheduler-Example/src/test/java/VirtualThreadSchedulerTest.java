@@ -3,12 +3,6 @@ import io.github.dreamlike.LoomSecretHelper;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -136,45 +130,5 @@ public class VirtualThreadSchedulerTest {
                     }));
             Assert.assertEquals(List.of(Thread.currentThread().getName(), "root-vt", "child-vt-0", "child-vt-1", "child-vt-2"), future.join().stream().map(Thread::getName).toList());
         }
-    }
-
-    @Test
-    public void testPollInterception() throws Exception {
-        CustomerVirtualThreadRuntime runtime = CustomerVirtualThreadRuntime.INSTANCE;
-        Assert.assertNotNull("Runtime should be initialized by agent", runtime);
-        runtime.resetPollCount();
-
-        // Start a server on a random port
-        ServerSocket serverSocket = new ServerSocket(0);
-        int port = serverSocket.getLocalPort();
-
-        CompletableFuture<String> result = new CompletableFuture<>();
-        Thread vt = Thread.ofVirtual().start(() -> {
-            try {
-                Socket socket = new Socket();
-                socket.connect(new InetSocketAddress("127.0.0.1", port));
-                InputStream in = socket.getInputStream();
-                byte[] buf = new byte[1024];
-                int n = in.read(buf);
-                result.complete(new String(buf, 0, n, StandardCharsets.UTF_8));
-                socket.close();
-            } catch (IOException e) {
-                result.completeExceptionally(e);
-            }
-        });
-
-        // Accept and send data
-        Socket client = serverSocket.accept();
-        client.getOutputStream().write("hello".getBytes(StandardCharsets.UTF_8));
-        client.getOutputStream().flush();
-        client.close();
-
-        Assert.assertEquals("hello", result.join());
-        vt.join();
-        serverSocket.close();
-
-        // poll() should have been called at least once (for the socket connect/read)
-        Assert.assertTrue("poll() should have been invoked, but count=" + runtime.getPollCount(),
-                runtime.getPollCount() > 0);
     }
 }

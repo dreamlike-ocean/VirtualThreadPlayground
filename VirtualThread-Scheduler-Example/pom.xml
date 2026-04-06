@@ -11,13 +11,11 @@
     </parent>
 
     <artifactId>VirtualThread-Scheduler-Example</artifactId>
+    <properties>
+        <agent.arg.line>-javaagent:${project.basedir}/../VirtualThread-Scheduler-Agent/target/VirtualThread-Scheduler-Agent-${project.version}.jar=jdk.virtualThreadScheduler.poller.implClass=io.github.dreamlike.scheduler.example.CustomerVirtualThreadRuntime</agent.arg.line>
+    </properties>
 
     <dependencies>
-        <dependency>
-            <groupId>io.netty</groupId>
-            <artifactId>netty-all</artifactId>
-            <version>4.2.10.Final</version>
-        </dependency>
         <dependency>
             <groupId>io.github.dreamlike</groupId>
             <artifactId>VirtualThread-Scheduler-Core</artifactId>
@@ -48,8 +46,79 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
                 <configuration>
-                    <argLine>-javaagent:${project.basedir}/../VirtualThread-Scheduler-Agent/target/VirtualThread-Scheduler-Agent-${project.version}.jar=jdk.virtualThreadScheduler.poller.implClass=io.github.dreamlike.scheduler.example.CustomerVirtualThreadRuntime</argLine>
+                    <!-- Disable Maven's implicit default-test execution; we run 4 explicit executions below. -->
+                    <skipTests>true</skipTests>
                 </configuration>
+                <executions>
+                    <execution>
+                        <id>poller-none</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <skipTests>false</skipTests>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <reportsDirectory>${project.build.directory}/surefire-reports-poller-none</reportsDirectory>
+                            <systemPropertyVariables>
+                                <test.expectedPollerMode></test.expectedPollerMode>
+                            </systemPropertyVariables>
+                            <argLine>${agent.arg.line}</argLine>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>poller-1</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <skipTests>false</skipTests>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <reportsDirectory>${project.build.directory}/surefire-reports-poller-1</reportsDirectory>
+                            <systemPropertyVariables>
+                                <test.expectedPollerMode>1</test.expectedPollerMode>
+                            </systemPropertyVariables>
+                            <argLine>${agent.arg.line} -Djdk.pollerMode=1</argLine>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>poller-2</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <skipTests>false</skipTests>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <reportsDirectory>${project.build.directory}/surefire-reports-poller-2</reportsDirectory>
+                            <systemPropertyVariables>
+                                <test.expectedPollerMode>2</test.expectedPollerMode>
+                            </systemPropertyVariables>
+                            <argLine>${agent.arg.line} -Djdk.pollerMode=2</argLine>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>poller-3</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <skipTests>false</skipTests>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                            <reportsDirectory>${project.build.directory}/surefire-reports-poller-3</reportsDirectory>
+                            <systemPropertyVariables>
+                                <test.expectedPollerMode>3</test.expectedPollerMode>
+                            </systemPropertyVariables>
+                            <argLine>${agent.arg.line}  -Djdk.pollerMode=3</argLine>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -75,4 +144,5 @@
             </plugin>
         </plugins>
     </build>
+
 </project>

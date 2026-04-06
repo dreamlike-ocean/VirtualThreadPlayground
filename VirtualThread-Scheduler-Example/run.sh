@@ -44,7 +44,7 @@ echo "  Agent: $AGENT_JAR"
 echo "  App:   $APP_JAR"
 case "$POLLER_MODE" in
   1) POLLER_MODE_LABEL="System Poller" ;;
-  2) POLLER_MODE_LABEL="Virtualthread Poller" ;;
+  2) POLLER_MODE_LABEL="VirtualThread Poller" ;;
   3) POLLER_MODE_LABEL="CarrierThreadPoller" ;;
 esac
 echo "  PollerMode: $POLLER_MODE_LABEL"
