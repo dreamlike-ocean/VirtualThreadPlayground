@@ -1,9 +1,11 @@
 package io.github.dreamlike;
 
+import java.io.IOException;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
 import java.util.concurrent.ForkJoinPool;
+import java.util.function.BooleanSupplier;
 
 /**
  * Abstract base class for custom virtual thread runtime implementations.
@@ -26,6 +28,8 @@ public abstract class AbstractVirtualThreadRuntime implements VirtualThreadRunti
 
     private static final VarHandle JDK_POLLER_VH;
     private static final MethodHandle BUILTIN_SCHEDULER_MH;
+    public static final short POLLIN;
+    public static final short POLLOUT;
 
     static {
         try {
@@ -41,6 +45,9 @@ public abstract class AbstractVirtualThreadRuntime implements VirtualThreadRunti
             Class<?> vtClass = Class.forName("java.lang.VirtualThread", false, null);
             BUILTIN_SCHEDULER_MH = lookup.findStatic(vtClass, "builtinScheduler",
                     MethodType.methodType(Thread.VirtualThreadScheduler.class, boolean.class));
+            Class<?> netClass = Class.forName("sun.nio.ch.Net", false, null);
+            POLLIN = (short) lookup.findStaticVarHandle(netClass, "POLLIN", short.class).get();
+            POLLOUT = (short) lookup.findStaticVarHandle(netClass, "POLLOUT", short.class).get();
         } catch (Exception e) {
             throw new RuntimeException("Failed to resolve handles for VirtualThread runtime", e);
         }
@@ -95,5 +102,15 @@ public abstract class AbstractVirtualThreadRuntime implements VirtualThreadRunti
     @Override
     public void onContinue(Thread.VirtualThreadTask task) {
         jdkScheduler().onContinue(task);
+    }
+
+    @Override
+    public void poll(int fdVal, int event, long nanos, BooleanSupplier isOpen) throws IOException {
+        jdkVirtualThreadPoller().poll(fdVal, event, nanos, isOpen);
+    }
+
+    @Override
+    public void pollSelector(int fdVal, long nanos) throws IOException {
+        jdkVirtualThreadPoller().pollSelector(fdVal, nanos);
     }
 }

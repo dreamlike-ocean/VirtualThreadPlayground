@@ -13,6 +13,7 @@
         <module>VirtualThread-Scheduler-Core</module>
         <module>VirtualThread-Scheduler-Agent</module>
         <module>VirtualThread-Scheduler-Example</module>
+        <module>VirtualThread-Scheduler-Io_uring</module>
     </modules>
 
     <properties>

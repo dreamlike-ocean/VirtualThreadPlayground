@@ -1,3 +1,5 @@
+import io.github.dreamlike.LoomSecretHelper;
+import io.github.dreamlike.PollerMode;
 import io.github.dreamlike.scheduler.example.CustomerVirtualThreadRuntime;
 import org.junit.Assert;
 import org.junit.Test;
@@ -23,13 +25,7 @@ public class VirtualThreadPollInterceptionTest {
             Assert.assertEquals("jdk.pollerMode must match test.expectedPollerMode", expectedPollerMode, pollerMode);
         }
 
-        String mode = switch (pollerMode) {
-            case "1" -> "SYSTEM_THREADS";
-            case "2" -> "VTHREAD_POLLERS";
-            case "3" -> "POLLER_PER_CARRIER";
-            case null -> "default";
-            default -> throw new IllegalStateException("Unexpected value: " + pollerMode);
-        };
+        String mode = PollerMode.CURRENT_TYPE.name();
         System.out.println("current mode: " + mode);
 
         CustomerVirtualThreadRuntime runtime = CustomerVirtualThreadRuntime.INSTANCE;
