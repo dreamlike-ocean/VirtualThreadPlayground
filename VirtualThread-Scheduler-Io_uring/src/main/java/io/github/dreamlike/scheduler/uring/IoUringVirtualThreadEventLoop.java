@@ -1,5 +1,6 @@
 package io.github.dreamlike.scheduler.uring;
 
+import io.github.dreamlike.scheduler.netty.NettyVirtualIoEventLoop;
 import io.netty.channel.IoEvent;
 import io.netty.channel.IoEventLoop;
 import io.netty.channel.IoEventLoopGroup;
@@ -22,7 +23,7 @@ class IoUringVirtualThreadEventLoop {
 
     static final InheritableThreadLocal<IoUringVirtualThreadEventLoop> CURRENT_DISPATCHER = new InheritableThreadLocal<>();
     private static final Thread.Builder.OfVirtual VIRTUAL_BUILDER = Thread.ofVirtual().name("iouring-netty-eventloop", 0);
-    private final ManualIoEventLoop ioEventLoop;
+    private final NettyVirtualIoEventLoop ioEventLoop;
     private final Thread.VirtualThreadTask eventLoopTask;
     private final EventExecutor carrierExecutor;
     private final IntObjectMap<Thread> fdMapping;
@@ -31,23 +32,14 @@ class IoUringVirtualThreadEventLoop {
     public IoUringVirtualThreadEventLoop(IoEventLoopGroup parentGroup, IoHandlerFactory ioHandlerFactory, EventExecutor carrierExecutor) {
         this.carrierExecutor = carrierExecutor;
         this.fdMapping = new IntObjectHashMap<>();
-        this.ioEventLoop = new ManualIoEventLoop(parentGroup, null, ioHandlerFactory) {
-            @Override
-            protected boolean canBlock() {
-                return true;
-            }
-
-            @Override
-            public boolean inEventLoop() {
-                return carrierExecutor.inEventLoop();
-            }
-
-        };
+        this.ioEventLoop = new NettyVirtualIoEventLoop(parentGroup, ioHandlerFactory);
         this.eventLoopTask = IoUringVirtualThreadRuntime.getInstance().newThread(VIRTUAL_BUILDER, this, () -> {
             CURRENT_DISPATCHER.set(this);
             FastThreadLocalThread.runWithFastThreadLocal(() -> nettyLoop(ioEventLoop));
         });
-        this.eventLoopTask.thread().start();
+        Thread thread = this.eventLoopTask.thread();
+        ioEventLoop.setOwningThread(thread);
+        thread.start();
         try {
             this.ioRegistration = ioEventLoop.register(new IoUringPoller()).get();
         } catch (InterruptedException | ExecutionException e) {
@@ -55,7 +47,7 @@ class IoUringVirtualThreadEventLoop {
         }
     }
 
-    private static void nettyLoop(ManualIoEventLoop ioEventLoop) {
+    private static void nettyLoop(NettyVirtualIoEventLoop ioEventLoop) {
         while (!ioEventLoop.isShutdown()) {
             ioEventLoop.run(0, 0);
         }

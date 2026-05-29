@@ -1,6 +1,5 @@
 package io.github.dreamlike.scheduler.uring;
 
-import io.netty.channel.EventLoop;
 import io.netty.channel.IoEventLoop;
 import io.netty.channel.IoHandlerFactory;
 import io.netty.channel.MultiThreadIoEventLoopGroup;

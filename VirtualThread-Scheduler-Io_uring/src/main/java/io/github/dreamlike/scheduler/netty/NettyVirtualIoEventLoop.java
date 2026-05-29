@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 
 
 public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor implements IoEventLoop {
@@ -134,7 +135,7 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
     private final AtomicReference<Thread> owningThread;
     private final IoHandler handler;
     private final Ticker ticker;
-    private final BlockingIoHandlerContext blockingContext = new BlockingIoHandlerContext();
+    private final VirtualThreadBlockContext blockingContext = new VirtualThreadBlockContext();
     private final int readinessFd;
     private volatile long gracefulShutdownQuietPeriod;
     private volatile long gracefulShutdownTimeout;
@@ -142,8 +143,8 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
     private long lastExecutionTime;
     private boolean initialized;
 
-    public NettyVirtualIoEventLoop(IoHandlerFactory factory) {
-        this.parent = null;
+    public NettyVirtualIoEventLoop(IoEventLoopGroup parent, IoHandlerFactory factory) {
+        this.parent = parent;
         this.owningThread = new AtomicReference<>();
         this.handler = factory.newHandler(this);
         this.ticker = Ticker.systemTicker();
@@ -258,20 +259,30 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
                 }
                 return runAllTasksBeforeDestroy();
             }
-            final int ioTasks = handler.run(context);
+            IoHandlerContext ioContext = readinessFd == NIO_READINESS_FD ? context : nonBlockingContext;
+            final int ioTasks = handler.run(ioContext);
+            if (ioTasks == 0 && canWaitOnJdkPoller(context)) {
+                long timeoutNanos = context.deadlineNanos() == -1 ? -1 : context.delayNanos(System.nanoTime());
+                if (timeoutNanos == -1 || timeoutNanos > 0) {
+                    IoUringVirtualThreadRuntime.getInstance().waitJdkPollIn(readinessFd, timeoutNanos);
+                }
+            }
             // Now run all tasks.
             if (runAllTasksTimeoutNanos < 0) {
                 return ioTasks;
             }
-            int runResult = ioTasks + runAllTasks(runAllTasksTimeoutNanos, false);
-            long timeoutNanos = context.deadlineNanos() == -1 ? -1 : context.delayNanos(System.nanoTime());
-            if (readinessFd != NIO_READINESS_FD) {
-                IoUringVirtualThreadRuntime.getInstance().waitJdkPollIn(readinessFd, timeoutNanos);
-            }
-            return runResult;
+            return ioTasks + runAllTasks(runAllTasksTimeoutNanos, false);
         } finally {
             ThreadExecutorMap.setCurrentExecutor(old);
         }
+    }
+
+    private boolean canWaitOnJdkPoller(IoHandlerContext context) {
+        return readinessFd != NIO_READINESS_FD
+                && context != nonBlockingContext
+                && !hasTasks()
+                && !hasScheduledTasks()
+                && canBlock();
     }
 
     private int runAllTasksBeforeDestroy() {
@@ -385,7 +396,18 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         if (isShuttingDown()) {
             return;
         }
-        handler.wakeup();
+        wakeup0();
+    }
+
+    private void wakeup0() {
+        if (readinessFd ==  NIO_READINESS_FD) {
+            handler.wakeup();
+            return;
+        }
+        Thread owningThread = this.owningThread.get();
+        if (owningThread != null) {
+            LockSupport.unpark(owningThread);
+        }
     }
 
     @Override
@@ -507,7 +529,7 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         if (wakeup) {
             // same as AbstractScheduledEventExecutor.WAKEUP_TASK
             taskQueue.offer(WAKEUP_TASK);
-            handler.wakeup();
+            wakeup0();
         }
     }
 
@@ -581,7 +603,7 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
                     throw new RejectedExecutionException("event executor terminated");
                 }
             }
-            handler.wakeup();
+            wakeup();
         }
     }
 
@@ -679,15 +701,17 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         }
     }
 
-    private class BlockingIoHandlerContext implements IoHandlerContext {
+    private class VirtualThreadBlockContext implements IoHandlerContext {
         // this is a positive amount of nanos or Long.MAX_VALUE for no limit
         long maxBlockingNanos = Long.MAX_VALUE;
 
         @Override
         public boolean canBlock() {
             assert inEventLoop();
-            return NettyVirtualIoEventLoop.this.readinessFd == NIO_READINESS_FD
-                    && !hasTasks()
+            if (NettyVirtualIoEventLoop.this.readinessFd != NIO_READINESS_FD) {
+                return false;
+            }
+            return !hasTasks()
                     && !hasScheduledTasks()
                     && NettyVirtualIoEventLoop.this.canBlock();
         }
@@ -695,7 +719,6 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         @Override
         public long delayNanos(long currentTimeNanos) {
             assert inEventLoop();
-            //todo 我们并不会真的block 所以再看看maxBlocking是不是真的需要
             return Math.min(maxBlockingNanos, NettyVirtualIoEventLoop.this.delayNanos(currentTimeNanos, maxBlockingNanos));
         }
 
