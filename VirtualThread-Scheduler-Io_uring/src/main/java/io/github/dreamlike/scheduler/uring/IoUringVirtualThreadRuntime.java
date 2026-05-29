@@ -9,7 +9,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 public class IoUringVirtualThreadRuntime extends AbstractVirtualThreadRuntime {
-    static final int EPOLLONESHOT = (1 << 30);
     private static IoUringVirtualThreadRuntime instance;
 
     public IoUringVirtualThreadRuntime() {
@@ -77,7 +76,7 @@ public class IoUringVirtualThreadRuntime extends AbstractVirtualThreadRuntime {
 
     public void waitJdkPollIn(int fd, long nanos) {
         try {
-            jdkVirtualThreadPoller().poll(fd, AbstractVirtualThreadRuntime.POLLIN | EPOLLONESHOT, nanos, () -> true);
+            jdkVirtualThreadPoller().poll(fd, AbstractVirtualThreadRuntime.POLLIN, nanos, () -> true);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }

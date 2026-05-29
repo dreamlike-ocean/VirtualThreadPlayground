@@ -1,4 +1,4 @@
-package io.io.github.dreamlike.scheduler.netty;
+package io.github.dreamlike.scheduler.netty;
 
 import io.github.dreamlike.scheduler.uring.IoUringVirtualThreadRuntime;
 import io.netty.channel.Channel;
@@ -14,10 +14,8 @@ import io.netty.channel.IoHandlerFactory;
 import io.netty.channel.IoRegistration;
 import io.netty.channel.epoll.EpollIoHandler;
 import io.netty.channel.kqueue.KQueueIoHandler;
-import io.netty.channel.nio.NioIoHandle;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.unix.FileDescriptor;
-import io.netty.channel.uring.IoUringIoHandle;
 import io.netty.channel.uring.IoUringIoHandler;
 import io.netty.util.concurrent.AbstractScheduledEventExecutor;
 import io.netty.util.concurrent.DefaultPromise;
@@ -64,8 +62,10 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         MethodHandles.Lookup lookup = MethodHandles.lookup();
         MethodHandle kqueueFdMethodHandler;
         try {
+            MethodHandles.Lookup kqueueLookup = MethodHandles.privateLookupIn(KQueueIoHandler.class, lookup);
             MethodHandle fdValue = lookup.findVirtual(FileDescriptor.class, "intValue", MethodType.methodType(int.class));
-            MethodHandle kqueueNettyFdGetterMethodHandler = lookup.findGetter(KQueueIoHandler.class, "kqueueFd", FileDescriptor.class);
+            MethodHandle kqueueNettyFdGetterMethodHandler =
+                    kqueueLookup.findGetter(KQueueIoHandler.class, "kqueueFd", FileDescriptor.class);
             kqueueFdMethodHandler = MethodHandles.filterReturnValue(kqueueNettyFdGetterMethodHandler,fdValue);
         } catch (Throwable e) {
             kqueueFdMethodHandler = null;
@@ -74,8 +74,10 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
 
         MethodHandle epollFdMethodHandler;
         try {
+            MethodHandles.Lookup epollLookup = MethodHandles.privateLookupIn(EpollIoHandler.class, lookup);
             MethodHandle fdValue = lookup.findVirtual(FileDescriptor.class, "intValue", MethodType.methodType(int.class));
-            MethodHandle epollNettyFdGetterMethodHandler = lookup.findGetter(EpollIoHandler.class, "epollFd", FileDescriptor.class);
+            MethodHandle epollNettyFdGetterMethodHandler =
+                    epollLookup.findGetter(EpollIoHandler.class, "epollFd", FileDescriptor.class);
             epollFdMethodHandler =  MethodHandles.filterReturnValue(epollNettyFdGetterMethodHandler,fdValue);
         } catch (Throwable e){
             epollFdMethodHandler = null;
@@ -85,9 +87,15 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         try {
             Class<?> ringBufferClass = Class.forName("io.netty.channel.uring.RingBuffer");
             Class<?> submissionQueueClass = Class.forName("io.netty.channel.uring.SubmissionQueue");
-            MethodHandle ioUringRingBufferGetterMethodHandler = lookup.findGetter(IoUringIoHandler.class, "ringBuffer", ringBufferClass);
-            MethodHandle ioUringRingBufferGetterSubmissionQueueGetterMethodHandler = lookup.findGetter(ringBufferClass, "ioUringSubmissionQueue",  submissionQueueClass);
-            MethodHandle ioUringSubmissionQueueRingFdGetterMethodHandler = lookup.findGetter(submissionQueueClass, "ringFd", int.class);
+            MethodHandles.Lookup ioUringLookup = MethodHandles.privateLookupIn(IoUringIoHandler.class, lookup);
+            MethodHandles.Lookup ringBufferLookup = MethodHandles.privateLookupIn(ringBufferClass, lookup);
+            MethodHandles.Lookup submissionQueueLookup = MethodHandles.privateLookupIn(submissionQueueClass, lookup);
+            MethodHandle ioUringRingBufferGetterMethodHandler =
+                    ioUringLookup.findGetter(IoUringIoHandler.class, "ringBuffer", ringBufferClass);
+            MethodHandle ioUringRingBufferGetterSubmissionQueueGetterMethodHandler =
+                    ringBufferLookup.findGetter(ringBufferClass, "ioUringSubmissionQueue",  submissionQueueClass);
+            MethodHandle ioUringSubmissionQueueRingFdGetterMethodHandler =
+                    submissionQueueLookup.findGetter(submissionQueueClass, "ringFd", int.class);
             ioUringFdMethodHandler = MethodHandles.filterReturnValue(
                     MethodHandles.filterReturnValue(ioUringRingBufferGetterMethodHandler, ioUringRingBufferGetterSubmissionQueueGetterMethodHandler),
                     ioUringSubmissionQueueRingFdGetterMethodHandler
@@ -97,7 +105,7 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         }
         IO_UIRING_READINESS_FD_MH = ioUringFdMethodHandler;
 
-        NIO_READINESS_FD_MH = MethodHandles.dropArguments(MethodHandles.constant(int.class, -1), 0, IoHandle.class);
+        NIO_READINESS_FD_MH = MethodHandles.dropArguments(MethodHandles.constant(int.class, -1), 0, IoHandler.class);
     }
 
     private final AtomicInteger state;
@@ -127,7 +135,6 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
     private final IoHandler handler;
     private final Ticker ticker;
     private final BlockingIoHandlerContext blockingContext = new BlockingIoHandlerContext();
-    //todo nioHandle单独处理
     private final int readinessFd;
     private volatile long gracefulShutdownQuietPeriod;
     private volatile long gracefulShutdownTimeout;
@@ -258,7 +265,9 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
             }
             int runResult = ioTasks + runAllTasks(runAllTasksTimeoutNanos, false);
             long timeoutNanos = context.deadlineNanos() == -1 ? -1 : context.delayNanos(System.nanoTime());
-            IoUringVirtualThreadRuntime.getInstance().waitJdkPollIn(readinessFd, timeoutNanos);
+            if (readinessFd != NIO_READINESS_FD) {
+                IoUringVirtualThreadRuntime.getInstance().waitJdkPollIn(readinessFd, timeoutNanos);
+            }
             return runResult;
         } finally {
             ThreadExecutorMap.setCurrentExecutor(old);
@@ -677,7 +686,10 @@ public class NettyVirtualIoEventLoop extends AbstractScheduledEventExecutor impl
         @Override
         public boolean canBlock() {
             assert inEventLoop();
-            return false;
+            return NettyVirtualIoEventLoop.this.readinessFd == NIO_READINESS_FD
+                    && !hasTasks()
+                    && !hasScheduledTasks()
+                    && NettyVirtualIoEventLoop.this.canBlock();
         }
 
         @Override
